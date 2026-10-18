@@ -56,9 +56,12 @@
 
 #include "Chat.h"
 #include "Config.h"
+#include "DatabaseEnv.h"
+#include "Log.h"
 #include "GuildMgr.h"
 #include "Player.h"
 #include "ScriptMgr.h"
+#include "WorldSession.h"
 #include "WorldSessionMgr.h"
 
 bool LoginEnable = 1;
@@ -138,231 +141,201 @@ public:
     }
 };
 
+// AzerothCore's AddItem may return true after storing only part of a stack.
+// Check capacity first and verify the entire requested quantity was added.
+static bool GrantStarterItem(Player* player, uint32 itemId, uint32 quantity)
+{
+    ItemPosCountVec destinations;
+    uint32 unavailable = 0;
+    if (player->CanStoreNewItem(NULL_BAG, NULL_SLOT, destinations, itemId, quantity, &unavailable) != EQUIP_ERR_OK || unavailable != 0)
+    {
+        LOG_ERROR("module", "CustomLogin: insufficient space for character {} item {} x{}", player->GetName(), itemId, quantity);
+        return false;
+    }
+
+    uint32 before = player->GetItemCount(itemId);
+    if (!player->AddItem(itemId, quantity) || player->GetItemCount(itemId) - before != quantity)
+    {
+        LOG_ERROR("module", "CustomLogin: incomplete grant for character {} item {} x{}", player->GetName(), itemId, quantity);
+        return false;
+    }
+    return true;
+}
+
 class CustomLogin : public PlayerScript
 {
 
 public:
     CustomLogin() : PlayerScript("CustomLogin", {
-        PLAYERHOOK_ON_FIRST_LOGIN,
         PLAYERHOOK_ON_LOGIN,
-        PLAYERHOOK_ON_LOGOUT
+        PLAYERHOOK_ON_LOGOUT,
+        PLAYERHOOK_ON_DELETE
     }) { }
 
-    void OnPlayerFirstLogin(Player* player) override
+    void OnPlayerDelete(ObjectGuid guid, uint32 /*accountId*/) override
     {
+        // Prevent stale receipts if a deleted character's GUID is reused.
+        CharacterDatabase.DirectExecute("DELETE FROM mod_customlogin_starter WHERE guid = {}", guid.GetCounter());
+    }
+
+    bool GrantStarterPackage(Player* player)
+    {
+        if (!player || !player->GetSession() || player->GetSession()->IsHeadless())
+            return false;
+
         // If enabled..
         if (LoginEnable)
         {
             // If enabled, give heirloom and other items
-            if (LoginBOA)
-            {
-                // Define Equipment
-                uint32 shoulders = 0, chest = 0, trinket = 0, weapon = 0, weapon2 = 0, weapon3 = 0, shoulders2 = 0, chest2 = 0, trinket2 = 0;
-                const uint32 bag = 23162;		// Foror's Crate of Endless Resist Gear Storage (36 Slot)
-                const uint32 ring = 50255;		// Dread Pirate Ring (5% XP Boost)
+	        if (LoginBOA)
+		{
+		    // Hunters can start with a quiver or ammo pouch occupying a bag slot.
+		    // Remove it before equipping the four starter bags. Original ammunition
+		    // is intentionally not retained; fresh arrows are granted below.
+		    if (player->getClass() == CLASS_HUNTER)
+		    {
+		        for (uint8 slot = INVENTORY_SLOT_BAG_START; slot < INVENTORY_SLOT_BAG_END; ++slot)
+		        {
+		            if (Item* equipped = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+		            {
+		                if (equipped->GetTemplate()->Class == ITEM_CLASS_QUIVER)
+		                    player->DestroyItem(INVENTORY_SLOT_BAG_0, slot, true);
+		            }
+		        }
+		    }
 
-                // Outfit the character with bags and heirlooms that match their class
-                // NOTE: Some classes have more than one heirloom option per slot
-                switch (player->getClass())
-                {
+		    // Do not replace existing bags; require the four configured bags.
+		    // A level-one hunter's starting quiver has already been removed above.
+		    for (uint8 slot = INVENTORY_SLOT_BAG_START; slot < INVENTORY_SLOT_BAG_END; ++slot)
+		    {
+		        if (Item* equipped = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+		        {
+		            if (equipped->GetEntry() != 41599)
+		            {
+		                LOG_ERROR("module", "CustomLogin: nonstarter bag in slot {} for character {}", slot, player->GetName());
+		                return false;
+		            }
+		}
+		    }
 
-                case CLASS_WARRIOR:
-                    shoulders = 42949;
-                    chest = 48685;
-                    trinket = 42991;
-                    weapon = 42943;
-                    weapon2 = 44092;
-                    weapon3 = 44093;
-                    break;
+		    for (uint8 slot = INVENTORY_SLOT_BAG_START; slot < INVENTORY_SLOT_BAG_END; ++slot)
+		    {
+		        if (!player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+		        {
+		            uint16 pos = (INVENTORY_SLOT_BAG_0 << 8) | slot;
+		            if (!player->EquipNewItem(pos, 41599, true))
+		            {
+		                LOG_ERROR("module", "CustomLogin: could not equip starter bag in slot {} for character {}", slot, player->GetName());
+		                return false;
+		            }
+		        }
+		    }
 
-                case CLASS_PALADIN:
-                    shoulders = 42949;
-                    chest = 48685;
-                    trinket = 42991;
-                    weapon = 42945;
-                    weapon2 = 44092;
-                    break;
+		    // One Dread Pirate Ring for every character
+		    if (!GrantStarterItem(player, 50255, 1)) return false;
 
-                case CLASS_HUNTER:
-                    shoulders = 42950;
-                    chest = 48677;
-                    trinket = 42991;
-                    weapon = 42943;
-                    weapon2 = 42946;
-                    weapon3 = 44093;
-                    break;
+		    switch (player->getClass())
+		    {
+		        case CLASS_WARRIOR:
+		            if (!GrantStarterItem(player, 42946, 1)) return false; // Heirloom bow
+		            if (!GrantStarterItem(player, 2512, 1000)) return false; // Level-one arrows
+		            if (!GrantStarterItem(player, 48685, 1)) return false;
+		            if (!GrantStarterItem(player, 42949, 1)) return false;
+		            if (!GrantStarterItem(player, 42943, 1)) return false;
+		            if (!GrantStarterItem(player, 42945, 1)) return false;
+		            if (!GrantStarterItem(player, 42991, 2)) return false;
+		            break;
 
-                case CLASS_ROGUE:
-                    shoulders = 42952;
-                    chest = 48689;
-                    trinket = 42991;
-                    weapon = 42944;
-                    weapon2 = 42944;
-                    break;
+		        case CLASS_PALADIN:
+		            if (!GrantStarterItem(player, 48685, 1)) return false;
+		            if (!GrantStarterItem(player, 42949, 1)) return false;
+		            if (!GrantStarterItem(player, 42943, 1)) return false;
+		            if (!GrantStarterItem(player, 48683, 1)) return false;
+		            if (!GrantStarterItem(player, 42951, 1)) return false;
+		            if (!GrantStarterItem(player, 42948, 1)) return false;
+		            if (!GrantStarterItem(player, 42992, 2)) return false;
+		            break;
 
-                case CLASS_PRIEST:
-                    shoulders = 42985;
-                    chest = 48691;
-                    trinket = 42992;
-                    weapon = 42947;
-                    break;
+		        case CLASS_HUNTER:
+		            if (!GrantStarterItem(player, 48677, 1)) return false;
+		            if (!GrantStarterItem(player, 42950, 1)) return false;
+		            if (!GrantStarterItem(player, 42946, 1)) return false;
+		            if (!GrantStarterItem(player, 2512, 3000)) return false; // Rough Arrows for level-one heirloom bow
+		            if (!GrantStarterItem(player, 42944, 2)) return false; // Agility daggers for melee stat sticks
+		            if (!GrantStarterItem(player, 42991, 2)) return false;
+		            break;
 
-                case CLASS_DEATH_KNIGHT:
-                    shoulders = 42949;
-                    chest = 48685;
-                    trinket = 42991;
-                    weapon = 42945;
-                    weapon2 = 44092;
-                    weapon3 = 42943;
-                    break;
+		        case CLASS_ROGUE:
+		            if (!GrantStarterItem(player, 42946, 1)) return false; // Heirloom bow
+		            if (!GrantStarterItem(player, 2512, 1000)) return false; // Level-one arrows
+		            if (!GrantStarterItem(player, 48689, 1)) return false;
+		            if (!GrantStarterItem(player, 42952, 1)) return false;
+		            if (!GrantStarterItem(player, 42944, 2)) return false;
+		            if (!GrantStarterItem(player, 42945, 1)) return false;
+		            if (!GrantStarterItem(player, 42991, 2)) return false;
+		            break;
 
-                case CLASS_SHAMAN:
-                    shoulders = 42951;
-                    chest = 48683;
-                    trinket = 42992;
-                    weapon = 42948;
-                    shoulders2 = 42951;
-                    chest2 = 48683;
-                    weapon2 = 42947;
-                    break;
+		        case CLASS_PRIEST:
+		            if (!GrantStarterItem(player, 48691, 1)) return false;
+		            if (!GrantStarterItem(player, 42985, 1)) return false;
+		            if (!GrantStarterItem(player, 42947, 1)) return false;
+		            if (!GrantStarterItem(player, 42948, 1)) return false;
+		            if (!GrantStarterItem(player, 42992, 2)) return false;
+		            break;
 
-                case CLASS_MAGE:
-                    shoulders = 42985;
-                    chest = 48691;
-                    trinket = 42992;
-                    weapon = 42947;
-                    break;
+		        case CLASS_DEATH_KNIGHT:
+		            if (!GrantStarterItem(player, 48685, 1)) return false;
+		            if (!GrantStarterItem(player, 42949, 1)) return false;
+		            if (!GrantStarterItem(player, 42943, 1)) return false;
+		            if (!GrantStarterItem(player, 42945, 1)) return false;
+		            if (!GrantStarterItem(player, 42991, 2)) return false;
+		            break;
 
-                case CLASS_WARLOCK:
-                    shoulders = 42985;
-                    chest = 48691;
-                    trinket = 42992;
-                    weapon = 42947;
-                    break;
+		        case CLASS_SHAMAN:
+		            if (!GrantStarterItem(player, 48677, 1)) return false;
+		            if (!GrantStarterItem(player, 42950, 1)) return false;
+		            if (!GrantStarterItem(player, 48716, 2)) return false;
+		            if (!GrantStarterItem(player, 42991, 2)) return false;
 
-                case CLASS_DRUID:
-                    shoulders = 42984;
-                    shoulders2 = 42952;
-                    chest = 48687;
-                    chest2 = 48689;
-                    trinket = 42992;
-                    trinket2 = 42991;
-                    weapon = 42948;
-                    weapon2 = 48718;
-                    break;
+		            if (!GrantStarterItem(player, 48683, 1)) return false;
+		            if (!GrantStarterItem(player, 42951, 1)) return false;
+		            if (!GrantStarterItem(player, 42948, 1)) return false;
+		            if (!GrantStarterItem(player, 42947, 1)) return false;
+		            if (!GrantStarterItem(player, 42992, 2)) return false;
+		            break;
 
-                default:
-                    break;
-                }
+		        case CLASS_MAGE:
+		            if (!GrantStarterItem(player, 48691, 1)) return false;
+		            if (!GrantStarterItem(player, 42985, 1)) return false;
+		            if (!GrantStarterItem(player, 42947, 1)) return false;
+		            if (!GrantStarterItem(player, 42992, 2)) return false;
+		            break;
 
-                // Hand out the heirlooms. I prefer only the ring and trinkets for new characters.
-                // TODO: Improve the code. No time, no care, no worries!
-                switch (player->getClass())
-                {
+		        case CLASS_WARLOCK:
+		            if (!GrantStarterItem(player, 48691, 1)) return false;
+		            if (!GrantStarterItem(player, 42985, 1)) return false;
+		            if (!GrantStarterItem(player, 42947, 1)) return false;
+		            if (!GrantStarterItem(player, 42992, 2)) return false;
+		            break;
 
-                case CLASS_PRIEST:
-                    if (LoginBOATrinket) { player->AddItem(trinket, 2); };
-                    if (LoginBOARing) { player->AddItem(ring, 1); }
-                    if (LoginBOAShoulders) { player->AddItem(shoulders, 1); }
-                    if (LoginBOAChest) { player->AddItem(chest, 1); }
-                    if (LoginBOAWeapon) { player->AddItem(weapon, 1); }
-                    if (LoginBOABags) { player->AddItem(bag, 1); }
-                    break;
+		        case CLASS_DRUID:
+		            if (!GrantStarterItem(player, 48689, 1)) return false;
+		            if (!GrantStarterItem(player, 42952, 1)) return false;
+		            if (!GrantStarterItem(player, 48718, 1)) return false;
+		            if (!GrantStarterItem(player, 42991, 2)) return false;
 
-                case CLASS_DEATH_KNIGHT:
-                    if (LoginBOATrinket) { player->AddItem(trinket, 2); };
-                    if (LoginBOARing) { player->AddItem(ring, 1); }
-                    if (LoginBOAShoulders) { player->AddItem(shoulders, 1); }
-                    if (LoginBOAChest) { player->AddItem(chest, 1); }
-                    if (LoginBOAWeapon) { player->AddItem(weapon, 1); }
-                    if (LoginBOAWeapon2) { player->AddItem(weapon2, 1); }
-                    if (LoginBOAWeapon3) { player->AddItem(weapon3, 1); }
-                    if (LoginBOABags) { player->AddItem(bag, 1); }
-                    break;
+		            if (!GrantStarterItem(player, 48687, 1)) return false;
+		            if (!GrantStarterItem(player, 42984, 1)) return false;
+		            if (!GrantStarterItem(player, 42947, 1)) return false;
+		            if (!GrantStarterItem(player, 42948, 1)) return false;
+		            if (!GrantStarterItem(player, 42992, 2)) return false;
+		            break;
 
-                case CLASS_PALADIN:
-                    if (LoginBOATrinket) { player->AddItem(trinket, 2); };
-                    if (LoginBOARing) { player->AddItem(ring, 1); }
-                    if (LoginBOAShoulders) { player->AddItem(shoulders, 1); }
-                    if (LoginBOAChest) { player->AddItem(chest, 1); }
-                    if (LoginBOAWeapon) { player->AddItem(weapon, 1); }
-                    if (LoginBOAWeapon2) { player->AddItem(weapon2, 1); }
-                    if (LoginBOABags) { player->AddItem(bag, 1); }
-                    break;
+		        default:
+		            break;
+		    }
 
-                case CLASS_WARRIOR:
-                    if (LoginBOATrinket) { player->AddItem(trinket, 2); };
-                    if (LoginBOARing) { player->AddItem(ring, 1); }
-                    if (LoginBOAShoulders) { player->AddItem(shoulders, 1); }
-                    if (LoginBOAChest) { player->AddItem(chest, 1); }
-                    if (LoginBOAWeapon) { player->AddItem(weapon, 1); }
-                    if (LoginBOAWeapon2) { player->AddItem(weapon2, 1); }
-                    if (LoginBOAWeapon3) { player->AddItem(weapon3, 1); }
-                    if (LoginBOABags) { player->AddItem(bag, 1); }
-                    break;
-
-                case CLASS_HUNTER:
-                    if (LoginBOATrinket) { player->AddItem(trinket, 2); };
-                    if (LoginBOARing) { player->AddItem(ring, 1); }
-                    if (LoginBOAShoulders) { player->AddItem(shoulders, 1); }
-                    if (LoginBOAChest) { player->AddItem(chest, 1); }
-                    if (LoginBOAWeapon) { player->AddItem(weapon, 1); }
-                    if (LoginBOAWeapon2) { player->AddItem(weapon2, 1); }
-                    if (LoginBOAWeapon3) { player->AddItem(weapon3, 1); }
-                    if (LoginBOABags) { player->AddItem(bag, 1); }
-                    break;
-
-                case CLASS_ROGUE:
-                    if (LoginBOATrinket) { player->AddItem(trinket, 2); };
-                    if (LoginBOARing) { player->AddItem(ring, 1); }
-                    if (LoginBOAShoulders) { player->AddItem(shoulders, 1); }
-                    if (LoginBOAChest) { player->AddItem(chest, 1); }
-                    if (LoginBOAWeapon) { player->AddItem(weapon, 1); }
-                    if (LoginBOAWeapon2) { player->AddItem(weapon2, 1); }
-                    if (LoginBOABags) { player->AddItem(bag, 1); }
-                    break;
-
-                case CLASS_DRUID:
-                    if (LoginBOATrinket) { player->AddItem(trinket, 2); };
-                    if (LoginBOATrinket) { player->AddItem(trinket2, 2); };
-                    if (LoginBOARing) { player->AddItem(ring, 1); }
-                    if (LoginBOAShoulders) { player->AddItem(shoulders, 1); }
-                    if (LoginBOAShoulders2) { player->AddItem(shoulders2, 1); }
-                    if (LoginBOAChest) { player->AddItem(chest, 1); }
-                    if (LoginBOAWeapon) { player->AddItem(weapon, 1); }
-                    if (LoginBOAWeapon2) { player->AddItem(weapon2, 1); }
-                    if (LoginBOAWeapon3) { player->AddItem(weapon3, 1); }
-                    if (LoginBOABags) { player->AddItem(bag, 1); }
-                    break;
-
-                case CLASS_SHAMAN:
-                    if (LoginBOATrinket) { player->AddItem(trinket, 2); };
-                    if (LoginBOARing) { player->AddItem(ring, 1); }
-                    if (LoginBOAShoulders) { player->AddItem(shoulders, 1); }
-                    if (LoginBOAShoulders2) { player->AddItem(shoulders2, 1); }
-                    if (LoginBOAChest) { player->AddItem(chest, 1); }
-                    if (LoginBOAChest2) { player->AddItem(chest2, 1); }
-                    if (LoginBOAWeapon) { player->AddItem(weapon, 1); }
-                    if (LoginBOAWeapon2) { player->AddItem(weapon2, 1); }
-                    if (LoginBOABags) { player->AddItem(bag, 1); }
-                    break;
-
-                default:
-                    if (LoginBOATrinket) { player->AddItem(trinket, 2); };
-                    if (LoginBOARing) { player->AddItem(ring, 1); }
-                    if (LoginBOAShoulders) { player->AddItem(shoulders, 1); }
-                    if (LoginBOAChest) { player->AddItem(chest, 1); }
-                    if (LoginBOAWeapon) { player->AddItem(weapon, 1); }
-                    if (LoginBOABags) { player->AddItem(bag, 1); }
-                    break;
-                }
-
-                // Inform the player they have new items
-                std::ostringstream ss;
-                ss << "|cffFF8000[|cFFBDB76BCL|cffFF8000] The Owner has placed |cFFBDB76Ba surprise|cffFF8000 in your backpack!";
-                ChatHandler(player->GetSession()).SendSysMessage(ss.str().c_str());
-            }
-
+		}
             // If enabled, learn additional skills
             if (LoginSkills)
             {
@@ -400,6 +373,7 @@ public:
                     break;
 
                 case CLASS_SHAMAN:
+                    player->learnSpell(674); // Dual Wield from first login
                     player->learnSpell(15590);	// Fists
                     player->learnSpell(8737);	// Mail
                     player->learnSpell(196);	// Axes
@@ -420,6 +394,8 @@ public:
                     break;
 
                 case CLASS_HUNTER:
+                    player->learnSpell(1180); // Daggers for paired Heartseekers
+                    player->learnSpell(5011); // Crossbows
                     player->learnSpell(674);	// Dual Wield
                     player->learnSpell(15590);	// Fists
                     player->learnSpell(264);	// Bows
@@ -431,6 +407,7 @@ public:
                     break;
 
                 case CLASS_ROGUE:
+                    player->learnSpell(674); // Dual Wield
                     player->learnSpell(264);	// Bows
                     player->learnSpell(5011);	// Crossbow
                     player->learnSpell(15590);	// Fists
@@ -462,6 +439,7 @@ public:
                     break;
 
                 case CLASS_DEATH_KNIGHT:
+                    player->learnSpell(674); // Dual Wield
                     player->learnSpell(198);	// Maces
                     player->learnSpell(199);	// 2H Mace
                     break;
@@ -488,7 +466,7 @@ public:
                 player->learnSpell(475);	// Remove Curse
 
                 // Add a few teleportation runes
-                player->AddItem(17031, 5);	// Rune of Teleportation
+                if (!GrantStarterItem(player, 17031, 5)) return false;	// Rune of Teleportation
 
                 // Learn Teleports
                 switch (player->GetTeamId())
@@ -558,15 +536,60 @@ public:
                 ChatHandler(player->GetSession()).SendSysMessage(ss.str().c_str());
             }
         }
+        if (LoginBOA)
+        {
+            // Money and the success message are granted only after all items succeed.
+            player->ModifyMoney(250000);
+            ChatHandler(player->GetSession()).SendSysMessage(
+                "Welcome to Brambletown! Your starter heirlooms, four Frostweave Bags, and 25 gold have been added.");
+        }
+        return true;
     }
 
     void OnPlayerLogin(Player* player) override
     {
-        // If enabled..
+        if (!player || !player->GetSession())
+            return;
+
         if (LoginEnable)
         {
+            uint32 guid = player->GetGUID().GetCounter();
+            bool isFirstLogin = player->HasAtLoginFlag(AT_LOGIN_FIRST);
+            // This hook runs before the core consumes AT_LOGIN_FIRST, including for bots.
+            // Record pending rewards now so a character first used as a bot can claim later.
+            if (isFirstLogin)
+                CharacterDatabase.DirectExecute("INSERT IGNORE INTO mod_customlogin_starter (guid, state) VALUES ({}, 0)", guid);
+
+            if (!player->GetSession()->IsHeadless())
+            {
+                uint8 state = 1;
+                if (QueryResult result = CharacterDatabase.Query("SELECT state FROM mod_customlogin_starter WHERE guid = {}", guid))
+                    state = result->Fetch()[0].Get<uint8>();
+                else
+                {
+                    // Migration fallback: missing old higher-level characters are exempt.
+                    state = player->GetLevel() == 1 || isFirstLogin ? 0 : 1;
+                    CharacterDatabase.DirectExecute("INSERT IGNORE INTO mod_customlogin_starter (guid, state) VALUES ({}, {})", guid, state);
+                }
+
+                if (state == 0)
+                {
+                    if (GrantStarterPackage(player))
+                        CharacterDatabase.DirectExecute("UPDATE mod_customlogin_starter SET state = 1 WHERE guid = {} AND state = 0", guid);
+                    else
+                    {
+                        // Never automatically retry a potentially partial grant: doing so duplicates items.
+                        CharacterDatabase.DirectExecute("UPDATE mod_customlogin_starter SET state = 2 WHERE guid = {} AND state = 0", guid);
+                        ChatHandler(player->GetSession()).SendSysMessage(
+                            "Your starter package could not be completed. Please contact a server administrator.");
+                    }
+                }
+                else if (state == 2)
+                    ChatHandler(player->GetSession()).SendSysMessage(
+                        "Your starter package needs administrator review.");
+            }
             // If enabled..
-            if (LoginPlayerAnnounce)
+            if (LoginPlayerAnnounce && player->GetSession() && !player->GetSession()->IsHeadless())
             {
                 // Announce Player Login
                 if (player->GetTeamId() == TEAM_ALLIANCE)
@@ -590,7 +613,7 @@ public:
         if (LoginEnable)
         {
             // If enabled..
-            if (LoginPlayerAnnounce)
+            if (LoginPlayerAnnounce && player->GetSession() && !player->GetSession()->IsHeadless())
             {
                 // Announce Player Login
                 if (player->GetTeamId() == TEAM_ALLIANCE)
