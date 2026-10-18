@@ -54,6 +54,7 @@
 */
 
 
+#include "Bag.h"
 #include "Chat.h"
 #include "Config.h"
 #include "DatabaseEnv.h"
@@ -68,17 +69,6 @@ bool LoginEnable = 1;
 bool LoginAnnounceModule = 1;
 bool LoginPlayerAnnounce = 1;
 bool LoginBOA = 1;
-bool LoginBOARing = 1;
-bool LoginBOABags = 1;
-bool LoginBOAShoulders = 1;
-bool LoginBOAShoulders2 = 1;
-bool LoginBOAChest = 1;
-bool LoginBOAChest2 = 1;
-bool LoginBOATrinket = 1;
-bool LoginBOATrinket2 = 1;
-bool LoginBOAWeapon = 1;
-bool LoginBOAWeapon2 = 1;
-bool LoginBOAWeapon3 = 1;
 bool LoginSkills = 1;
 bool LoginSpecialAbility = 0;
 bool LoginReputation = 1;
@@ -106,17 +96,6 @@ public:
         LoginAnnounceModule = sConfigMgr->GetOption<bool>("Login.Announce", 1);
         LoginPlayerAnnounce = sConfigMgr->GetOption<bool>("Login.PlayerAnnounce", 1);
         LoginBOA = sConfigMgr->GetOption<bool>("Login.BoA", 1);
-        LoginBOARing = sConfigMgr->GetOption<bool>("Login.BoA.Ring", 1);
-        LoginBOABags = sConfigMgr->GetOption<bool>("Login.BoA.Bags",1);
-        LoginBOAShoulders = sConfigMgr->GetOption<bool>("Login.BoA.Shoulders", 1);
-        LoginBOAShoulders2 = sConfigMgr->GetOption<bool>("Login.BoA.Shoulders2",1);
-        LoginBOAChest = sConfigMgr->GetOption<bool>("Login.BoA.Chest",1);
-        LoginBOAChest2 = sConfigMgr->GetOption<bool>("Login.BoA.Chest2",1);
-        LoginBOATrinket = sConfigMgr->GetOption<bool>("Login.BoA.Trinket",1);
-        LoginBOATrinket2 = sConfigMgr->GetOption<bool>("Login.BoA.Trinket2",1);
-        LoginBOAWeapon = sConfigMgr->GetOption<bool>("Login.BoA.Weapon",1);
-        LoginBOAWeapon2 = sConfigMgr->GetOption<bool>("Login.BoA.Weapon2",1);
-        LoginBOAWeapon3 = sConfigMgr->GetOption<bool>("Login.BoA.Weapon3",1);
         LoginSkills = sConfigMgr->GetOption<bool>("Login.Skills", 1);
         LoginSpecialAbility = sConfigMgr->GetOption<bool>("Login.SpecialAbility", 1);
         LoginReputation = sConfigMgr->GetOption<bool>("Login.Reputation", 1);
@@ -189,34 +168,81 @@ public:
             // If enabled, give heirloom and other items
 	        if (LoginBOA)
 		{
-		    // Hunters can start with a quiver or ammo pouch occupying a bag slot.
-		    // Remove it before equipping the four starter bags. Original ammunition
-		    // is intentionally not retained; fresh arrows are granted below.
-		    if (player->getClass() == CLASS_HUNTER)
-		    {
-		        for (uint8 slot = INVENTORY_SLOT_BAG_START; slot < INVENTORY_SLOT_BAG_END; ++slot)
-		        {
-		            if (Item* equipped = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
-		            {
-		                if (equipped->GetTemplate()->Class == ITEM_CLASS_QUIVER)
-		                    player->DestroyItem(INVENTORY_SLOT_BAG_0, slot, true);
-		            }
-		        }
-		    }
+            // Allow replacing only a level-one hunter's default quiver.
+            // Validate all bags and preserve every contained item before removal.
+            bool const removableQuiver = player->getClass() == CLASS_HUNTER && player->GetLevel() == 1;
+            uint32 itemsToMove = 0;
+            for (uint8 slot = INVENTORY_SLOT_BAG_START; slot < INVENTORY_SLOT_BAG_END; ++slot)
+            {
+                Item* equipped = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+                if (!equipped || equipped->GetEntry() == 41599)
+                    continue;
 
-		    // Do not replace existing bags; require the four configured bags.
-		    // A level-one hunter's starting quiver has already been removed above.
-		    for (uint8 slot = INVENTORY_SLOT_BAG_START; slot < INVENTORY_SLOT_BAG_END; ++slot)
-		    {
-		        if (Item* equipped = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
-		        {
-		            if (equipped->GetEntry() != 41599)
-		            {
-		                LOG_ERROR("module", "CustomLogin: nonstarter bag in slot {} for character {}", slot, player->GetName());
-		                return false;
-		            }
-		}
-		    }
+                if (!removableQuiver || equipped->GetTemplate()->Class != ITEM_CLASS_QUIVER || !equipped->ToBag())
+                {
+                    LOG_ERROR("module", "CustomLogin: nonstarter bag in slot {} for character {}", slot, player->GetName());
+                    return false;
+                }
+
+                Bag* quiver = equipped->ToBag();
+                for (uint8 inside = 0; inside < quiver->GetBagSize(); ++inside)
+                {
+                    if (Item* item = quiver->GetItemByPos(inside))
+                    {
+                        ItemPosCountVec destinations;
+                        if (player->CanStoreItem(INVENTORY_SLOT_BAG_0, NULL_SLOT, destinations, item, false) != EQUIP_ERR_OK)
+                        {
+                            LOG_ERROR("module", "CustomLogin: cannot preserve quiver item {} for character {}",
+                                item->GetEntry(), player->GetName());
+                            return false;
+                        }
+                        ++itemsToMove;
+                    }
+                }
+            }
+
+            // Conservative space reservation: one ordinary backpack slot per
+            // contained stack, even when two stacks could otherwise merge.
+            uint32 freeBackpackSlots = 0;
+            for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
+                if (!player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+                    ++freeBackpackSlots;
+
+            if (freeBackpackSlots < itemsToMove)
+            {
+                LOG_ERROR("module", "CustomLogin: insufficient space to preserve quiver contents for {}", player->GetName());
+                return false;
+            }
+
+            if (removableQuiver)
+            {
+                for (uint8 slot = INVENTORY_SLOT_BAG_START; slot < INVENTORY_SLOT_BAG_END; ++slot)
+                {
+                    Item* equipped = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
+                    if (!equipped || equipped->GetTemplate()->Class != ITEM_CLASS_QUIVER)
+                        continue;
+
+                    Bag* quiver = equipped->ToBag();
+                    for (uint8 inside = 0; inside < quiver->GetBagSize(); ++inside)
+                    {
+                        Item* item = quiver->GetItemByPos(inside);
+                        if (!item)
+                            continue;
+
+                        ItemPosCountVec destinations;
+                        if (player->CanStoreItem(INVENTORY_SLOT_BAG_0, NULL_SLOT, destinations, item, false) != EQUIP_ERR_OK)
+                            return false;
+
+                        player->RemoveItem(slot, inside, true);
+                        player->StoreItem(destinations, item, true);
+                    }
+
+                    if (!quiver->IsEmpty())
+                        return false;
+
+                    player->DestroyItem(INVENTORY_SLOT_BAG_0, slot, true);
+                }
+            }
 
 		    for (uint8 slot = INVENTORY_SLOT_BAG_START; slot < INVENTORY_SLOT_BAG_END; ++slot)
 		    {
@@ -540,8 +566,6 @@ public:
         {
             // Money and the success message are granted only after all items succeed.
             player->ModifyMoney(250000);
-            ChatHandler(player->GetSession()).SendSysMessage(
-                "Welcome to Brambletown! Your starter heirlooms, four Frostweave Bags, and 25 gold have been added.");
         }
         return true;
     }
@@ -562,31 +586,59 @@ public:
 
             if (!player->GetSession()->IsHeadless())
             {
-                uint8 state = 1;
-                if (QueryResult result = CharacterDatabase.Query("SELECT state FROM mod_customlogin_starter WHERE guid = {}", guid))
-                    state = result->Fetch()[0].Get<uint8>();
-                else
+                // A bot-first login creates a pending receipt before AzerothCore
+                // consumes AT_LOGIN_FIRST. Never infer eligibility from level 1.
+                QueryResult receipt = CharacterDatabase.Query(
+                    "SELECT state FROM mod_customlogin_starter WHERE guid = {}", guid);
+                if (!receipt)
                 {
-                    // Migration fallback: missing old higher-level characters are exempt.
-                    state = player->GetLevel() == 1 || isFirstLogin ? 0 : 1;
-                    CharacterDatabase.DirectExecute("INSERT IGNORE INTO mod_customlogin_starter (guid, state) VALUES ({}, {})", guid, state);
+                    uint8 initialState = isFirstLogin ? 0 : 1;
+                    CharacterDatabase.DirectExecute(
+                        "INSERT IGNORE INTO mod_customlogin_starter (guid, state) VALUES ({}, {})", guid, initialState);
+                    receipt = CharacterDatabase.Query(
+                        "SELECT state FROM mod_customlogin_starter WHERE guid = {}", guid);
                 }
 
-                if (state == 0)
+                if (!receipt)
                 {
-                    if (GrantStarterPackage(player))
-                        CharacterDatabase.DirectExecute("UPDATE mod_customlogin_starter SET state = 1 WHERE guid = {} AND state = 0", guid);
-                    else
-                    {
-                        // Never automatically retry a potentially partial grant: doing so duplicates items.
-                        CharacterDatabase.DirectExecute("UPDATE mod_customlogin_starter SET state = 2 WHERE guid = {} AND state = 0", guid);
-                        ChatHandler(player->GetSession()).SendSysMessage(
-                            "Your starter package could not be completed. Please contact a server administrator.");
-                    }
-                }
-                else if (state == 2)
+                    // Database errors must never authorize a duplicate grant.
+                    LOG_ERROR("module", "CustomLogin: missing starter receipt for {}", player->GetName());
                     ChatHandler(player->GetSession()).SendSysMessage(
-                        "Your starter package needs administrator review.");
+                        "Your starter package status is unavailable. Please contact a server administrator.");
+                }
+                else
+                {
+                    uint8 state = receipt->Fetch()[0].Get<uint8>();
+                    if (state == 0)
+                    {
+                        // SaveToDB postpones a save during a far teleport.
+                        if (player->IsBeingTeleportedFar())
+                            return;
+
+                        bool granted = GrantStarterPackage(player);
+                        // Character inventory, money, and the receipt must commit
+                        // together, including partial grants needing GM review.
+                        CharacterDatabaseTransaction transaction = CharacterDatabase.BeginTransaction();
+                        player->SaveToDB(transaction, false, false);
+                        transaction->Append(
+                            "UPDATE mod_customlogin_starter SET state = {} WHERE guid = {} AND state = 0",
+                            granted ? 1u : 2u, guid);
+                        CharacterDatabase.DirectCommitTransaction(transaction);
+
+                        if (granted)
+                        {
+                            if (LoginBOA)
+                                ChatHandler(player->GetSession()).SendSysMessage(
+                                    "Welcome to Brambletown! Your starter heirlooms, four Frostweave Bags, and 25 gold have been added.");
+                        }
+                        else
+                            ChatHandler(player->GetSession()).SendSysMessage(
+                                "Your starter package could not be completed. Please contact a server administrator.");
+                    }
+                    else if (state == 2)
+                        ChatHandler(player->GetSession()).SendSysMessage(
+                            "Your starter package needs administrator review.");
+                }
             }
             // If enabled..
             if (LoginPlayerAnnounce && player->GetSession() && !player->GetSession()->IsHeadless())
