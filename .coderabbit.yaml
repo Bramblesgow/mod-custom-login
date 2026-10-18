@@ -8,8 +8,6 @@ reviews:
   auto_review:
     enabled: true
     drafts: false
-    base_branches:
-      - "master"
 
   path_instructions:
     - path: "src/**/*.{cpp,h,hpp}"
