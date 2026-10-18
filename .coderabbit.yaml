@@ -1,0 +1,34 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: en-US
+
+reviews:
+  profile: assertive
+  high_level_summary: true
+  request_changes_workflow: false
+  auto_review:
+    enabled: true
+    drafts: false
+    base_branches:
+      - "master"
+
+  path_instructions:
+    - path: "src/**/*.{cpp,h,hpp}"
+      instructions: |
+        Review this as an AzerothCore WotLK server module, not standalone C++.
+        Focus on correctness, unsafe pointer use, lifetime and ownership, hook
+        behavior, unintended effects on playerbots, performance, and regressions.
+        For first-login starter packages, scrutinize one-time grants, persistence,
+        duplicate grants, inventory capacity, equipment/class restrictions, and
+        characters first used as bots before their first human login.
+        Flag assumptions about AzerothCore APIs only when they are supported by
+        the code or known API behavior. Prefer concrete defects over style comments.
+        Cite the affected lines and describe how to reproduce significant issues.
+        Do not assert that static review alone proves runtime compatibility.
+    - path: "conf/**/*"
+      instructions: |
+        Check option names, defaults, reload behavior, backward compatibility,
+        and unintended effects of enabling or disabling options.
+    - path: ".github/workflows/**/*"
+      instructions: |
+        Check that workflows run on pull requests, use appropriate permissions,
+        and do not expose credentials or deploy automatically.
