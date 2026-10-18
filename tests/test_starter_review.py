@@ -40,6 +40,25 @@ class StarterReview(unittest.TestCase):
                         section.index("else if (granted)"))
         self.assertIn('committedReceipt->Fetch()[0].Get<uint8>() == (granted ? 1u : 2u)', section)
 
+    def test_unconfirmed_commit_recovery_cannot_leave_regrant_open(self):
+        recovery = CODE.split("if (!committed)", 1)[1].split("else if (granted)", 1)[0]
+        self.assertIn("SET state = 2 WHERE guid = {} AND state = 0", recovery)
+        self.assertLess(recovery.index("DirectCommitTransaction(recovery)"),
+                        recovery.index("QueryResult recovered"))
+        self.assertIn("recoveredState != 1 && recoveredState != 2", recovery)
+        self.assertIn("QueueStarterNoSaveLogout(guid)", recovery)
+
+    def test_no_save_logout_is_deferred_until_session_update(self):
+        session = CODE.split("class CustomLoginRecoverySessionScript", 1)[1].split("bool LoginEnable", 1)[0]
+        self.assertIn("SESSIONHOOK_ON_UPDATE", session)
+        self.assertIn("pendingStarterLogoutGuids.erase(guid)", session)
+        self.assertIn("session->LogoutPlayer(false)", session)
+        self.assertIn("new CustomLoginRecoverySessionScript()", CODE)
+        # PlayerLogin is called before the core finishes using its Player*.
+        # Never delete the player there or rely on a regular save-on-disconnect.
+        on_login = CODE.split("void OnPlayerLogin(Player* player) override")[-1]
+        self.assertNotIn("LogoutPlayer(false)", on_login)
+
     def test_missing_receipt_is_not_level_based(self):
         section = CODE.split("void OnPlayerLogin(Player* player) override", 2)[-1]
         self.assertIn("uint8 initialState = isFirstLogin ? 0 : 1;", section)

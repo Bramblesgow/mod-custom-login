@@ -64,6 +64,49 @@
 #include "ScriptMgr.h"
 #include "WorldSession.h"
 #include "WorldSessionMgr.h"
+#include <mutex>
+#include <unordered_set>
+
+// A failed receipt write can leave starter items only in memory. Deferring a
+// no-save logout until SessionScript avoids deleting Player from OnPlayerLogin,
+// where the core still references it after this hook returns.
+namespace
+{
+    std::mutex pendingStarterLogoutMutex;
+    std::unordered_set<uint32> pendingStarterLogoutGuids;
+
+    void QueueStarterNoSaveLogout(uint32 guid)
+    {
+        std::lock_guard<std::mutex> lock(pendingStarterLogoutMutex);
+        pendingStarterLogoutGuids.insert(guid);
+    }
+}
+
+class CustomLoginRecoverySessionScript : public SessionScript
+{
+public:
+    CustomLoginRecoverySessionScript() : SessionScript("CustomLoginRecoverySessionScript", {
+        SESSIONHOOK_ON_UPDATE
+    }) { }
+
+    void OnSessionUpdate(WorldSession* session, uint32 /*diff*/) override
+    {
+        if (!session || !session->GetPlayer())
+            return;
+
+        uint32 guid = session->GetPlayer()->GetGUID().GetCounter();
+        {
+            std::lock_guard<std::mutex> lock(pendingStarterLogoutMutex);
+            if (pendingStarterLogoutGuids.erase(guid) == 0)
+                return;
+        }
+
+        // Runs from WorldSession::Update after the login handler has returned.
+        // Never let an unsafely granted package reach a later automatic save.
+        LOG_ERROR("module", "CustomLogin: discarding unverified starter grants for character {}", guid);
+        session->LogoutPlayer(false);
+    }
+};
 
 bool LoginEnable = 1;
 bool LoginAnnounceModule = 1;
@@ -634,7 +677,28 @@ public:
                             committedReceipt->Fetch()[0].Get<uint8>() == (granted ? 1u : 2u);
                         if (!committed)
                         {
-                            LOG_ERROR("module", "CustomLogin: starter transaction outcome unavailable for {}", player->GetName());
+                            // A failed commit may leave rewards in memory while
+                            // the durable receipt still permits another grant.
+                            // Mark the receipt for GM review without replacing
+                            // an already-completed receipt.
+                            CharacterDatabaseTransaction recovery = CharacterDatabase.BeginTransaction();
+                            recovery->Append(
+                                "UPDATE mod_customlogin_starter SET state = 2 WHERE guid = {} AND state = 0", guid);
+                            CharacterDatabase.DirectCommitTransaction(recovery);
+
+                            QueryResult recovered = CharacterDatabase.Query(
+                                "SELECT state FROM mod_customlogin_starter WHERE guid = {}", guid);
+                            uint8 recoveredState = recovered ? recovered->Fetch()[0].Get<uint8>() : 0;
+                            if (recoveredState != 1 && recoveredState != 2)
+                            {
+                                LOG_ERROR("module", "CustomLogin: cannot secure receipt for {}; scheduling no-save logout",
+                                    player->GetName());
+                                QueueStarterNoSaveLogout(guid);
+                            }
+                            else
+                                LOG_ERROR("module", "CustomLogin: starter receipt for {} recovered to state {}",
+                                    player->GetName(), recoveredState);
+
                             ChatHandler(player->GetSession()).SendSysMessage(
                                 "Your starter package status is unavailable. Please contact a server administrator.");
                         }
@@ -703,4 +767,5 @@ void AddCustomLoginScripts()
     new LoginConfig();
     new LoginAnnounce();
     new CustomLogin();
+    new CustomLoginRecoverySessionScript();
 }

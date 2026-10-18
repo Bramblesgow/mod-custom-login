@@ -22,8 +22,18 @@ module on the production server and its live character database are unchanged.
 - Failure to read a durable receipt after attempting an insert does not
   authorize rewards. Because the transaction API returns no success indicator,
   reread the stored receipt after committing. Report success or partial-grant
-  status only if its durable state matches the expected result; otherwise
-  show an unavailable-status message for administrator investigation.
+  status only if its durable state matches the expected result.
+- On an unconfirmed commit, attempt a separate conditional transaction to
+  change pending receipt state 0 to manual-review state 2. Re-read its durable
+  state: state 1 or 2 blocks duplicate grants. If the recovery transaction
+  also fails or cannot be verified, queue the player for a no-save logout on
+  the next world-session update. This prevents a later automatic save from
+  persisting unverified in-memory rewards while the receipt remains pending.
+- **Do not call LogoutPlayer(false) directly from OnPlayerLogin.** The core's
+  CharacterHandler still uses the Player pointer after the login hook returns;
+  deleting it in that hook would risk a use-after-free. The registered
+  SessionScript executes the emergency no-save logout on the world thread
+  after the login handler completes.
 
 ## Initial migration / bot-first behavior
 - Existing receipt rows are never overwritten (INSERT IGNORE).
