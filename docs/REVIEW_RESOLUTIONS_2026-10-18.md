@@ -20,7 +20,10 @@ module on the production server and its live character database are unchanged.
 - Guard teleport-delayed Player::SaveToDB to avoid updating a receipt when
   saving the character would be deferred.
 - Failure to read a durable receipt after attempting an insert does not
-  authorize rewards.
+  authorize rewards. Because the transaction API returns no success indicator,
+  reread the stored receipt after committing. Report success or partial-grant
+  status only if its durable state matches the expected result; otherwise
+  show an unavailable-status message for administrator investigation.
 
 ## Initial migration / bot-first behavior
 - Existing receipt rows are never overwritten (INSERT IGNORE).
@@ -36,6 +39,22 @@ module on the production server and its live character database are unchanged.
   pending; do not automatically grant to a previously logged-in level-one
   character. The initial live migration already created 423 pending records
   and this PR does not modify them.
+- **Before deployment**, a server administrator must review all legacy
+  pending receipts with a cleared first-login flag and determine whether
+  each represents a bot-first character, an already rewarded player, or
+  another exceptional case. Read-only candidate query on the *characters* DB:
+
+  ```sql
+  SELECT s.guid, c.name, c.level, c.at_login, c.totaltime
+  FROM mod_customlogin_starter AS s
+  JOIN characters AS c ON c.guid = s.guid
+  WHERE s.state = 0 AND (c.at_login & 0x20) = 0;
+  ```
+
+  Do not automatically change these receipts. The flag can identify cases
+  needing investigation; it cannot establish whether rewards were received.
+  Record the intended disposition for each affected player account, and
+  distinguish random-playerbot accounts from human-owned alts.
 
 ## Configuration
 - Retain Login.BoA as the single master switch for the fixed Brambletown

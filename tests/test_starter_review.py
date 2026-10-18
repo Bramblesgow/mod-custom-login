@@ -32,6 +32,13 @@ class StarterReview(unittest.TestCase):
         self.assertLess(section.index("transaction->Append("), section.index("CharacterDatabase.DirectCommitTransaction(transaction)"))
         self.assertIn("granted ? 1u : 2u", section)
         self.assertNotIn("CharacterDatabase.DirectExecute", section)
+        self.assertLess(section.index("DirectCommitTransaction(transaction)"),
+                        section.index("QueryResult committedReceipt"))
+        self.assertLess(section.index("QueryResult committedReceipt"),
+                        section.index("if (!committed)"))
+        self.assertLess(section.index("if (!committed)"),
+                        section.index("else if (granted)"))
+        self.assertIn('committedReceipt->Fetch()[0].Get<uint8>() == (granted ? 1u : 2u)', section)
 
     def test_missing_receipt_is_not_level_based(self):
         section = CODE.split("void OnPlayerLogin(Player* player) override", 2)[-1]

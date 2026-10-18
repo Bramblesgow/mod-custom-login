@@ -625,7 +625,20 @@ public:
                             granted ? 1u : 2u, guid);
                         CharacterDatabase.DirectCommitTransaction(transaction);
 
-                        if (granted)
+                        // DirectCommitTransaction is synchronous but does not report
+                        // failure to its caller. Confirm the durable receipt before
+                        // telling the player that their starter package completed.
+                        QueryResult committedReceipt = CharacterDatabase.Query(
+                            "SELECT state FROM mod_customlogin_starter WHERE guid = {}", guid);
+                        bool committed = committedReceipt &&
+                            committedReceipt->Fetch()[0].Get<uint8>() == (granted ? 1u : 2u);
+                        if (!committed)
+                        {
+                            LOG_ERROR("module", "CustomLogin: starter transaction outcome unavailable for {}", player->GetName());
+                            ChatHandler(player->GetSession()).SendSysMessage(
+                                "Your starter package status is unavailable. Please contact a server administrator.");
+                        }
+                        else if (granted)
                         {
                             if (LoginBOA)
                                 ChatHandler(player->GetSession()).SendSysMessage(
