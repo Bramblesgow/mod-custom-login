@@ -41,6 +41,10 @@ No changes to live worldserver files, character data, configuration, or runtime.
 - A subsequent `OnPlayerLogin` also clears a matching leftover request before
   processing rewards. This prevents an exceptional disconnect from carrying
   a stale no-save logout into a new session that reuses the same identity.
+- The session update also checks the original Player object, not just the
+  session address and GUID. AzerothCore's already-in-world reconnect path can
+  reattach a Player without calling `OnPlayerLogin`, so that hook alone cannot
+  eliminate all inherited requests.
 - An atomic quick check avoids taking the global mutex on every ordinary
   session tick. This is not a general task scheduling framework.
 
