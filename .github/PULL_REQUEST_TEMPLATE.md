@@ -21,11 +21,12 @@
 - [ ] One-time grants, persistence, configuration, and reload cases tested where applicable.
 - [ ] No secrets, server credentials, webhook tokens, or personal data included.
 - [ ] No unapproved production deployment or restart.
-- [ ] Changes made after review or testing were re-reviewed or retested as needed.
 
 ### Test evidence
 
-<!-- Link CI/build evidence, reproduction steps, and results. For tests that do not apply (such as gameplay tests for documentation-only changes), record N/A and why. Explain differing reviewed/tested SHAs and any subsequent re-review or retest. -->
+<!-- Link CI/build evidence, reproduction steps, and test results.
+For tests that do not apply (e.g., gameplay tests for documentation-only changes),
+record N/A and why. Explain differing review/test SHAs and any retest. -->
 
 ## Independent review
 
