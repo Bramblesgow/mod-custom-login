@@ -19,12 +19,16 @@ to third-party forks. Keep the working production code separate from proposed ch
 
 ## 2. Develop as a proposed change
 
-1. Branch from the stable target branch:
-   `feature/<short-topic>`, `fix/<short-topic>`, or `chore/<short-topic>`.
+1. Branch from the stable target branch, or from a parent PR branch when
+   stacking changes: `feature/<short-topic>`, `fix/<short-topic>`, or
+   `chore/<short-topic>`.
 2. Implement one coherent change and commit with a descriptive message.
 3. Build against the server's actual AzerothCore revision and module set.
-4. Run specific game tests and document both passed and untested cases.
-5. Open a pull request to the stable branch and complete the PR template.
+4. Run specific game tests and document both passed and untested cases,
+   including the source commit SHA used for successful tests.
+5. Open a pull request to the stable branch (or to the parent PR branch for
+   stacked work), and complete the PR template. Retarget stacked PRs after
+   the parent is merged.
 6. Do not change running production files as part of submitting a review.
 
 ## 3. Obtain independent CodeRabbit review
@@ -37,17 +41,29 @@ to third-party forks. Keep the working production code separate from proposed ch
   Use `@coderabbitai full review` when the entire PR needs re-evaluation.
 - Review every material finding, fix defects, and document any finding
   judged inapplicable (including the evidence for that decision).
+- Record the source commit SHA covered by the final independent review.
+  If changes follow review, obtain re-review of the affected changes.
 - Do not assume CodeRabbit can verify custom AzerothCore hooks, database
   state, runtime configuration, NPC spawning, or playerbot behavior without
   a matching build and live-style test.
 
 ## 4. Merge and deploy
 
+- Before merge, record the reviewed and successfully tested source commit SHAs
+  separately in the PR. If they differ, explain what changed and re-review or
+  rerun relevant tests so the final proposed changes are covered.
 - Merge only when the targeted build/checks pass, CodeRabbit feedback is
   handled (or its unavailability is recorded), and a human has approved.
-- Record the merged SHA and tag an intentional known-good release where useful.
+- Record the resulting merge commit SHA and tag a known-good release where useful.
 - Back up changed configuration or other relevant files before deployment.
-- Deploy that exact reviewed commit; note it in the release/PR record.
+- Record the deployed source commit SHA and, for built artifacts, the artifact
+  identifier and source commit from which it was built.
+- Merge, squash, rebase, or build operations can produce a different commit
+  SHA or artifact ID from the reviewed/tested source. Do not require SHA
+  equality; document how the deployed module source or artifact corresponds
+  to the tested changes (for example, compare source diffs and build provenance).
+  If conflict resolution or integration changes affect behavior, review and
+  test the resulting source before deployment.
 - Perform a smoke test after restart or hot reload, as appropriate to the
   change. Do not assume configuration reload replaces code compilation.
 - Revert to the last known-good commit when a release fails verification.

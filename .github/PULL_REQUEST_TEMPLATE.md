@@ -11,6 +11,9 @@
 
 ## Verification
 
+- Reviewed source commit SHA (final independent review):
+- Successfully tested source commit SHA (build/test results below):
+
 - [ ] Existing deployed behavior is preserved or differences are documented.
 - [ ] Module builds against the target AzerothCore revision, or build blocker is explained.
 - [ ] Relevant in-game tests completed; record commands, characters, and results below.
@@ -21,7 +24,9 @@
 
 ### Test evidence
 
-<!-- CI link, build log, reproduction steps, test outcomes. "Not tested" is acceptable only with a stated blocker. -->
+<!-- Link CI/build evidence, reproduction steps, and test results.
+For tests that do not apply (e.g., gameplay tests for documentation-only changes),
+record N/A and why. Explain differing review/test SHAs and any retest. -->
 
 ## Independent review
 
@@ -30,10 +35,12 @@
 - [ ] Changes re-reviewed after significant fixes.
 - [ ] Human approval of remaining risks recorded.
 
-## Deployment record (complete after merge)
+## Deployment record (complete after merge; use N/A when not deployed)
 
 - Merged commit SHA:
-- Deployed commit SHA:
+- Deployed source commit SHA:
+- Build artifact ID and build source SHA (if applicable):
+- Source mapping when merged/deployed SHA differs from tested SHA (diff or build provenance):
 - Deployment date / server:
 - Smoke-test results:
 - Rollback commit or procedure:
