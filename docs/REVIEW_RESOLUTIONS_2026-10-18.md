@@ -25,10 +25,10 @@ module on the production server and its live character database are unchanged.
   status only if its durable state matches the expected result.
 - On an unconfirmed commit, attempt a separate conditional transaction to
   change pending receipt state 0 to manual-review state 2. Re-read its durable
-  state: state 1 or 2 blocks duplicate grants. If the recovery transaction
-  also fails or cannot be verified, queue the player for a no-save logout on
-  the next world-session update. This prevents a later automatic save from
-  persisting unverified in-memory rewards while the receipt remains pending.
+  state: state 1 or 2 blocks duplicate grants. Always queue a no-save
+  logout after an unconfirmed initial commit, even when the receipt can be
+  recovered: the original character save may still have failed. This prevents
+  a later save from persisting unverified in-memory rewards.
 - **Do not call LogoutPlayer(false) directly from OnPlayerLogin.** The core's
   CharacterHandler still uses the Player pointer after the login hook returns;
   deleting it in that hook would risk a use-after-free. The registered

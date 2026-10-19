@@ -794,7 +794,13 @@ public:
 
     void OnPlayerLogin(Player* player) override
     {
-        if (!player || !player->GetSession() || !LoginEnable)
+        if (!player || !player->GetSession())
+            return;
+
+        // A new login must never inherit a deferred logout from a prior
+        // session, even if the session address and character GUID are reused.
+        ClearPendingStarterLogout(player);
+        if (!LoginEnable)
             return;
 
         if (!ProcessStarterLogin(player))

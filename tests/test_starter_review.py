@@ -69,6 +69,10 @@ class StarterReview(unittest.TestCase):
         self.assertIn("std::atomic<bool> hasPendingStarterLogouts", CODE)
         on_login = CODE.split("void OnPlayerLogin(Player* player) override")[-1]
         self.assertNotIn("LogoutPlayer(false)", on_login)
+        self.assertLess(on_login.index("ClearPendingStarterLogout(player)"),
+                        on_login.index("ProcessStarterLogin(player)"))
+        self.assertLess(on_login.index("ClearPendingStarterLogout(player)"),
+                        on_login.index("if (!LoginEnable)"))
 
     def test_failed_bot_first_receipt_retains_first_login_eligibility(self):
         section = CODE.split("void OnPlayerFirstLogin(Player* player) override", 1)[1].split("void OnPlayerDelete(", 1)[0]

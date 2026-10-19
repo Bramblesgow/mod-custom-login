@@ -38,6 +38,9 @@ No changes to live worldserver files, character data, configuration, or runtime.
   are discarded without affecting the new player.
 - `OnPlayerLogout` removes an entry when a session leaves through another
   code path. `OnSessionUpdate` removes it before calling no-save logout.
+- A subsequent `OnPlayerLogin` also clears a matching leftover request before
+  processing rewards. This prevents an exceptional disconnect from carrying
+  a stale no-save logout into a new session that reuses the same identity.
 - An atomic quick check avoids taking the global mutex on every ordinary
   session tick. This is not a general task scheduling framework.
 
