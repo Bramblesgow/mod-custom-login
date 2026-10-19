@@ -5,7 +5,7 @@
 
 ### Description ###
 ------------------------------------------------------------------------------------------------------------------
-- All options can be enabled or disabled in config
+- Independent starter, skill, reputation, and player announcement options are configured in worldserver
 - Player ([ Faction ] - Name - Logon/Logoff message) notification can be announced to the world
 - New characters can receive items, bags, and class-specific heirlooms on first login
 - New characters can receive class-specific skills on first login
@@ -18,7 +18,7 @@
 - Type: Player/Server
 - Script: LoginMods
 - Config: Yes
-- SQL: No
+- SQL: Yes (characters database, mod_customlogin_starter receipt table)
 
 
 ### Version ###
