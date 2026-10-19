@@ -19,13 +19,16 @@ to third-party forks. Keep the working production code separate from proposed ch
 
 ## 2. Develop as a proposed change
 
-1. Branch from the stable target branch:
-   `feature/<short-topic>`, `fix/<short-topic>`, or `chore/<short-topic>`.
+1. Branch from the stable target branch, or from a parent PR branch when
+   stacking changes: `feature/<short-topic>`, `fix/<short-topic>`, or
+   `chore/<short-topic>`.
 2. Implement one coherent change and commit with a descriptive message.
 3. Build against the server's actual AzerothCore revision and module set.
 4. Run specific game tests and document both passed and untested cases,
    including the source commit SHA used for successful tests.
-5. Open a pull request to the stable branch and complete the PR template.
+5. Open a pull request to the stable branch (or to the parent PR branch for
+   stacked work), and complete the PR template. Retarget stacked PRs after
+   the parent is merged.
 6. Do not change running production files as part of submitting a review.
 
 ## 3. Obtain independent CodeRabbit review
