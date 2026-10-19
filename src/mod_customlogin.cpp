@@ -64,21 +64,40 @@
 #include "ScriptMgr.h"
 #include "WorldSession.h"
 #include "WorldSessionMgr.h"
+#include <atomic>
 #include <mutex>
-#include <unordered_set>
+#include <unordered_map>
+#include <vector>
 
-// A failed receipt write can leave starter items only in memory. Deferring a
-// no-save logout until SessionScript avoids deleting Player from OnPlayerLogin,
-// where the core still references it after this hook returns.
+// When a starter transaction cannot be verified, keep the Player alive until
+// the login hook returns; only then may the world-session update log it out.
+// Match BOTH session identity and character GUID so a stale entry cannot
+// affect another player if a session pointer or character GUID is reused.
 namespace
 {
     std::mutex pendingStarterLogoutMutex;
-    std::unordered_set<uint32> pendingStarterLogoutGuids;
+    std::unordered_map<WorldSession*, uint32> pendingStarterLogouts;
+    std::atomic<bool> hasPendingStarterLogouts{false};
 
-    void QueueStarterNoSaveLogout(uint32 guid)
+    void QueueStarterNoSaveLogout(Player* player)
     {
+        WorldSession* session = player->GetSession();
         std::lock_guard<std::mutex> lock(pendingStarterLogoutMutex);
-        pendingStarterLogoutGuids.insert(guid);
+        pendingStarterLogouts[session] = player->GetGUID().GetCounter();
+        hasPendingStarterLogouts.store(true, std::memory_order_release);
+    }
+
+    void ClearPendingStarterLogout(Player* player)
+    {
+        if (!hasPendingStarterLogouts.load(std::memory_order_acquire))
+            return;
+
+        std::lock_guard<std::mutex> lock(pendingStarterLogoutMutex);
+        WorldSession* session = player->GetSession();
+        auto it = pendingStarterLogouts.find(session);
+        if (it != pendingStarterLogouts.end() && it->second == player->GetGUID().GetCounter())
+            pendingStarterLogouts.erase(it);
+        hasPendingStarterLogouts.store(!pendingStarterLogouts.empty(), std::memory_order_release);
     }
 }
 
@@ -91,20 +110,28 @@ public:
 
     void OnSessionUpdate(WorldSession* session, uint32 /*diff*/) override
     {
-        if (!session || !session->GetPlayer())
+        if (!session || !hasPendingStarterLogouts.load(std::memory_order_acquire))
             return;
 
-        uint32 guid = session->GetPlayer()->GetGUID().GetCounter();
+        bool shouldLogout = false;
         {
             std::lock_guard<std::mutex> lock(pendingStarterLogoutMutex);
-            if (pendingStarterLogoutGuids.erase(guid) == 0)
+            auto it = pendingStarterLogouts.find(session);
+            if (it == pendingStarterLogouts.end())
                 return;
+
+            Player* player = session->GetPlayer();
+            shouldLogout = player && player->GetGUID().GetCounter() == it->second;
+            // Always clear the entry, including a vanished or changed player.
+            pendingStarterLogouts.erase(it);
+            hasPendingStarterLogouts.store(!pendingStarterLogouts.empty(), std::memory_order_release);
         }
 
-        // Runs from WorldSession::Update after the login handler has returned.
-        // Never let an unsafely granted package reach a later automatic save.
-        LOG_ERROR("module", "CustomLogin: discarding unverified starter grants for character {}", guid);
-        session->LogoutPlayer(false);
+        if (shouldLogout)
+        {
+            LOG_ERROR("module", "CustomLogin: discarding unverified starter grants with no-save logout");
+            session->LogoutPlayer(false);
+        }
     }
 };
 
@@ -190,9 +217,27 @@ class CustomLogin : public PlayerScript
 public:
     CustomLogin() : PlayerScript("CustomLogin", {
         PLAYERHOOK_ON_LOGIN,
+        PLAYERHOOK_ON_FIRST_LOGIN,
         PLAYERHOOK_ON_LOGOUT,
         PLAYERHOOK_ON_DELETE
     }) { }
+
+    void OnPlayerFirstLogin(Player* player) override
+    {
+        // AzerothCore clears AT_LOGIN_FIRST immediately before this hook.
+        // If the durable receipt could not be written, restore the flag so
+        // a bot-first character remains eligible even if it later saves.
+        if (!LoginEnable || !player)
+            return;
+
+        QueryResult receipt = CharacterDatabase.Query(
+            "SELECT state FROM mod_customlogin_starter WHERE guid = {}", player->GetGUID().GetCounter());
+        if (!receipt)
+        {
+            player->SetAtLoginFlag(AT_LOGIN_FIRST);
+            LOG_ERROR("module", "CustomLogin: retaining first-login eligibility for {} (missing receipt)", player->GetName());
+        }
+    }
 
     void OnPlayerDelete(ObjectGuid guid, uint32 /*accountId*/) override
     {
@@ -211,10 +256,22 @@ public:
             // If enabled, give heirloom and other items
 	        if (LoginBOA)
 		{
-            // Allow replacing only a level-one hunter's default quiver.
-            // Validate all bags and preserve every contained item before removal.
+            // Only replace a level-one hunter's default quiver. Map each
+            // contained stack to a distinct empty backpack slot so the core's
+            // StoreItem() cannot split or merge it (and invalidate its pointer).
+            struct AmmoMove
+            {
+                uint8 bagSlot;
+                uint8 itemSlot;
+                uint8 backpackSlot;
+            };
+            std::vector<AmmoMove> ammoMoves;
+            std::vector<uint8> emptyBackpackSlots;
+            for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
+                if (!player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
+                    emptyBackpackSlots.push_back(slot);
+
             bool const removableQuiver = player->getClass() == CLASS_HUNTER && player->GetLevel() == 1;
-            uint32 itemsToMove = 0;
             for (uint8 slot = INVENTORY_SLOT_BAG_START; slot < INVENTORY_SLOT_BAG_END; ++slot)
             {
                 Item* equipped = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
@@ -230,31 +287,58 @@ public:
                 Bag* quiver = equipped->ToBag();
                 for (uint8 inside = 0; inside < quiver->GetBagSize(); ++inside)
                 {
-                    if (Item* item = quiver->GetItemByPos(inside))
+                    Item* item = quiver->GetItemByPos(inside);
+                    if (!item)
+                        continue;
+
+                    if (ammoMoves.size() >= emptyBackpackSlots.size())
                     {
-                        ItemPosCountVec destinations;
-                        if (player->CanStoreItem(INVENTORY_SLOT_BAG_0, NULL_SLOT, destinations, item, false) != EQUIP_ERR_OK)
-                        {
-                            LOG_ERROR("module", "CustomLogin: cannot preserve quiver item {} for character {}",
-                                item->GetEntry(), player->GetName());
-                            return false;
-                        }
-                        ++itemsToMove;
+                        LOG_ERROR("module", "CustomLogin: no safe backpack space for quiver items on {}", player->GetName());
+                        return false;
                     }
+
+                    uint8 destinationSlot = emptyBackpackSlots[ammoMoves.size()];
+                    ItemPosCountVec destinations;
+                    uint16 destination = (INVENTORY_SLOT_BAG_0 << 8) | destinationSlot;
+                    if (player->CanStoreItem(INVENTORY_SLOT_BAG_0, destinationSlot, destinations, item, false) != EQUIP_ERR_OK ||
+                        destinations.size() != 1 || destinations[0].pos != destination ||
+                        destinations[0].count != item->GetCount())
+                    {
+                        LOG_ERROR("module", "CustomLogin: cannot preserve quiver item {} for character {}",
+                            item->GetEntry(), player->GetName());
+                        return false;
+                    }
+                    ammoMoves.push_back({slot, inside, destinationSlot});
                 }
             }
 
-            // Conservative space reservation: one ordinary backpack slot per
-            // contained stack, even when two stacks could otherwise merge.
-            uint32 freeBackpackSlots = 0;
-            for (uint8 slot = INVENTORY_SLOT_ITEM_START; slot < INVENTORY_SLOT_ITEM_END; ++slot)
-                if (!player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot))
-                    ++freeBackpackSlots;
-
-            if (freeBackpackSlots < itemsToMove)
+            // The entire plan was checked before the first inventory mutation.
+            for (AmmoMove const& move : ammoMoves)
             {
-                LOG_ERROR("module", "CustomLogin: insufficient space to preserve quiver contents for {}", player->GetName());
-                return false;
+                Bag* quiver = player->GetItemByPos(INVENTORY_SLOT_BAG_0, move.bagSlot)->ToBag();
+                Item* item = quiver->GetItemByPos(move.itemSlot);
+                if (!item)
+                    return false;
+
+                uint16 destination = (INVENTORY_SLOT_BAG_0 << 8) | move.backpackSlot;
+                ItemPosCountVec destinations;
+                if (player->CanStoreItem(INVENTORY_SLOT_BAG_0, move.backpackSlot, destinations, item, false) != EQUIP_ERR_OK ||
+                    destinations.size() != 1 || destinations[0].pos != destination ||
+                    destinations[0].count != item->GetCount())
+                    return false;
+
+                player->RemoveItem(move.bagSlot, move.itemSlot, true);
+                Item* stored = player->StoreItem(destinations, item, true);
+                if (!stored || player->GetItemByPos(INVENTORY_SLOT_BAG_0, move.backpackSlot) != stored)
+                {
+                    // For a single empty destination, AzerothCore's StoreItem
+                    // reuses the original item; attempt to restore it on failure.
+                    if (!stored && !quiver->GetItemByPos(move.itemSlot) &&
+                        !player->GetItemByPos(INVENTORY_SLOT_BAG_0, move.backpackSlot))
+                        quiver->StoreItem(move.itemSlot, item, true);
+                    LOG_ERROR("module", "CustomLogin: quiver move failed for {}", player->GetName());
+                    return false;
+                }
             }
 
             if (removableQuiver)
@@ -262,27 +346,12 @@ public:
                 for (uint8 slot = INVENTORY_SLOT_BAG_START; slot < INVENTORY_SLOT_BAG_END; ++slot)
                 {
                     Item* equipped = player->GetItemByPos(INVENTORY_SLOT_BAG_0, slot);
-                    if (!equipped || equipped->GetTemplate()->Class != ITEM_CLASS_QUIVER)
+                    if (!equipped || equipped->GetEntry() == 41599)
                         continue;
 
                     Bag* quiver = equipped->ToBag();
-                    for (uint8 inside = 0; inside < quiver->GetBagSize(); ++inside)
-                    {
-                        Item* item = quiver->GetItemByPos(inside);
-                        if (!item)
-                            continue;
-
-                        ItemPosCountVec destinations;
-                        if (player->CanStoreItem(INVENTORY_SLOT_BAG_0, NULL_SLOT, destinations, item, false) != EQUIP_ERR_OK)
-                            return false;
-
-                        player->RemoveItem(slot, inside, true);
-                        player->StoreItem(destinations, item, true);
-                    }
-
-                    if (!quiver->IsEmpty())
+                    if (!quiver || !quiver->IsEmpty())
                         return false;
-
                     player->DestroyItem(INVENTORY_SLOT_BAG_0, slot, true);
                 }
             }
@@ -693,11 +762,15 @@ public:
                             {
                                 LOG_ERROR("module", "CustomLogin: cannot secure receipt for {}; scheduling no-save logout",
                                     player->GetName());
-                                QueueStarterNoSaveLogout(guid);
                             }
                             else
                                 LOG_ERROR("module", "CustomLogin: starter receipt for {} recovered to state {}",
                                     player->GetName(), recoveredState);
+
+                            // Even when the receipt is secured, a failed initial
+                            // character save leaves rewards in an uncertain state.
+                            // Never allow them to be used or saved again this login.
+                            QueueStarterNoSaveLogout(player);
 
                             ChatHandler(player->GetSession()).SendSysMessage(
                                 "Your starter package status is unavailable. Please contact a server administrator.");
@@ -739,6 +812,9 @@ public:
 
     void OnPlayerLogout(Player *player) override
     {
+        if (player)
+            ClearPendingStarterLogout(player);
+
         if (LoginEnable)
         {
             // If enabled..
