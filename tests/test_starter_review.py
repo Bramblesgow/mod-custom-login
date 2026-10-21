@@ -34,16 +34,37 @@ class StarterReview(unittest.TestCase):
         self.assertIn("if (player->IsBeingTeleportedFar())", CODE.split("bool ProcessStarterLogin(Player* player)", 1)[1])
         self.assertLess(section.index("GrantStarterPackage(player)"), section.index("CharacterDatabase.BeginTransaction()"))
         self.assertLess(section.index("player->SaveToDB(transaction, false, false)"), section.index('transaction->Append('))
-        self.assertLess(section.index("transaction->Append("), section.index("CharacterDatabase.DirectCommitTransaction(transaction)"))
+        self.assertLess(section.index("transaction->Append("), section.index("CharacterDatabase.AsyncCommitTransaction(transaction)"))
         self.assertIn("granted ? 1u : 2u", section)
         self.assertNotIn("CharacterDatabase.DirectExecute", section)
-        self.assertLess(section.index("DirectCommitTransaction(transaction)"),
+        self.assertNotIn("CharacterDatabase.DirectCommitTransaction(transaction)", section)
+        self.assertNotIn("CharacterDatabase.CommitTransaction(transaction)", section)
+        self.assertLess(section.index("AsyncCommitTransaction(transaction)"),
+                        section.index("commit.m_future.get()"))
+        self.assertLess(section.index("commit.m_future.get()"),
                         section.index("QueryResult committedReceipt"))
+        self.assertIn("catch (std::exception const& error)", section)
+        self.assertIn("transactionSucceeded && committedReceipt", section)
         self.assertLess(section.index("QueryResult committedReceipt"),
                         section.index("if (!committed)"))
         self.assertLess(section.index("if (!committed)"),
                         section.index("else if (granted)"))
         self.assertIn('committedReceipt->Fetch()[0].Get<uint8>() == (granted ? 1u : 2u)', section)
+
+    def test_original_sync_commit_regression(self):
+        section = CODE.split("void CompleteStarterGrant(Player* player, uint32 guid)", 1)[1].split(
+            "bool ProcessStarterLogin(Player* player)", 1)[0]
+        # The previous guard explicitly required DirectCommitTransaction,
+        # so a passing test actually permitted the production crash.
+        self.assertIn("player->SaveToDB(transaction, false, false)", section)
+        self.assertIn("CharacterDatabase.AsyncCommitTransaction(transaction)", section)
+        self.assertIn("commit.m_future.get()", section)
+        self.assertNotIn("DirectCommitTransaction(transaction)", section)
+        # The async save is completed before a session callback or logout
+        # can destroy the Player; no uncaptured delayed callback is installed.
+        self.assertNotIn("AfterComplete(", section)
+        self.assertNotIn("AddTransactionCallback(", section)
+        self.assertIn("QueueStarterNoSaveLogout(player)", section)
 
     def test_unconfirmed_commit_recovery_cannot_leave_regrant_open(self):
         recovery = CODE.split("if (!committed)", 1)[1].split("else if (granted)", 1)[0]
