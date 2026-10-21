@@ -5,9 +5,11 @@
 #include <string>
 #include <cstdint>
 #include <cstdlib>
+#include <chrono>
 
 static constexpr uint32 kSuccess = 391000001;
 static constexpr uint32 kFailure = 391000002;
+static constexpr uint32 kPending = 391000003;
 
 static uint32 scalar(std::string const& sql)
 {
@@ -48,8 +50,10 @@ int main(int argc,char** argv)
         CharacterDatabase.DirectExecute("CREATE TABLE IF NOT EXISTS clfx_rewards (guid INT UNSIGNED PRIMARY KEY, gold INT UNSIGNED NOT NULL DEFAULT 0, item_count INT UNSIGNED NOT NULL DEFAULT 0) ENGINE=InnoDB");
         CharacterDatabase.DirectExecute("INSERT IGNORE INTO clfx_rewards(guid) VALUES ({})", kSuccess);
         CharacterDatabase.DirectExecute("INSERT IGNORE INTO clfx_rewards(guid) VALUES ({})", kFailure);
+        CharacterDatabase.DirectExecute("INSERT IGNORE INTO clfx_rewards(guid) VALUES ({})", kPending);
         CharacterDatabase.DirectExecute("INSERT IGNORE INTO mod_customlogin_starter(guid,state) VALUES ({},0)",kSuccess);
         CharacterDatabase.DirectExecute("INSERT IGNORE INTO mod_customlogin_starter(guid,state) VALUES ({},0)",kFailure);
+        CharacterDatabase.DirectExecute("INSERT IGNORE INTO mod_customlogin_starter(guid,state) VALUES ({},0)",kPending);
 
         if (mode == "legacy")
         {
@@ -77,6 +81,29 @@ int main(int argc,char** argv)
                 check(scalar("SELECT state FROM mod_customlogin_starter WHERE guid=391000001")==1,"reconnect/relogin gate failed");
             check(scalar("SELECT gold FROM clfx_rewards WHERE guid=391000001")==250000,"duplicate gold");
             std::cout << "PASS actual async worker prepared statement + atomic gold/items/receipt and repeat receipt gate\n";
+        }
+        else if (mode == "pending")
+        {
+            // Hold a row lock on the synchronous connection to back up the
+            // async worker and show that polling its future never blocks.
+            CharacterDatabase.DirectExecute("START TRANSACTION");
+            CharacterDatabase.DirectExecute("UPDATE clfx_rewards SET gold=gold WHERE guid=391000003");
+            auto tx = transactionWithPrepared(kPending);
+            tx->Append("UPDATE clfx_rewards SET gold=gold+250000 WHERE guid=391000003");
+            tx->Append("UPDATE mod_customlogin_starter SET state=1 WHERE guid=391000003 AND state=0");
+            auto future = CharacterDatabase.AsyncCommitTransaction(tx);
+            auto const start = std::chrono::steady_clock::now();
+            auto const status = future.m_future.wait_for(std::chrono::seconds(0));
+            auto const elapsed = std::chrono::steady_clock::now() - start;
+            check(status == std::future_status::timeout, "blocked worker unexpectedly completed");
+            check(elapsed < std::chrono::milliseconds(100), "readiness poll blocked");
+            CharacterDatabase.DirectExecute("ROLLBACK");
+            check(future.m_future.get(), "pending transaction did not recover after row unlock");
+            check(scalar("SELECT gold FROM clfx_rewards WHERE guid=391000003")==250000,
+                "pending transaction lost gold");
+            check(scalar("SELECT state FROM mod_customlogin_starter WHERE guid=391000003")==1,
+                "pending transaction lost receipt");
+            std::cout << "PASS pending async worker polled without blocking and committed after unlock\n";
         }
         else if (mode=="failure")
         {
