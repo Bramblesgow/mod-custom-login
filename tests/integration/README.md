@@ -35,9 +35,14 @@ ulimit -c 0
 # Expected: exit 0, changes to prepared statement, synthetic items/gold, and receipt commit.
 /path/to/separate-test-workspace/isolated_db_worker failure clfx_disposable_characters
 # Expected: exit 0, duplicate-key fault rolls back all changes; state-2 recovery.
+/path/to/separate-test-workspace/isolated_db_worker pending clfx_disposable_characters
+# Expected: exit 0, nonblocking readiness poll while the async worker is held
+# by a disposable row lock, then a successful commit after unlocking.
 ```
 
 Run the modes **once against a fresh disposable schema**. The test intentionally does not reset receipt states or delete records. On completion, inspect the two synthetic receipt rows and rewards and preserve results with test logs. Do not run SQL cleanup against the production database.
+
+The `pending` mode locks a synthetic row on a disposable synchronous DB connection and polls the async worker's future with `wait_for(0)`. Its final blocking `get()` happens only in the **standalone test harness after releasing the lock**, never in the production world/session hook.
 
 The legacy-mode reproduction uses `CHAR_UPD_ADD_AT_LOGIN_FLAG`, an actual async-only character prepared statement. The real `Player::SaveToDB` path includes other async-only statements, notably `CHAR_UPD_CHARACTER`. This reproduces their connection-type failure mechanism, not a full Player save. `success` and `failure` exercise the worker's actual transaction execution, but gold and item counts are synthetic; they do not substitute for isolated client testing of inventory, logout/reconnect, bots, or Hunter quivers.
 
