@@ -50,8 +50,10 @@ to third-party forks. Keep the working production code separate from proposed ch
 ## 4. Merge and deploy
 
 - Before merge, record the reviewed and successfully tested source commit SHAs
-  separately in the PR. If they differ, explain what changed and re-review or
-  rerun relevant tests so the final proposed changes are covered.
+  separately in the PR. If they differ, explain what changed and update each
+  stale validation: re-review changes not covered by the reviewed SHA and rerun
+  relevant tests for changes not covered by the tested SHA. Confirm that both
+  review and test evidence cover the final proposed source.
 - Merge only when the targeted build/checks pass, CodeRabbit feedback is
   handled (or its unavailability is recorded), and a human has approved.
 - Record the resulting merge commit SHA and tag a known-good release where useful.
