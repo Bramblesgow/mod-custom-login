@@ -15,18 +15,23 @@ MIGRATION = (ROOT / "data/sql/db-characters/updates/2026_10_16_00_customlogin_st
 
 class StarterReview(unittest.TestCase):
     def test_quiver_move_and_destroy_order(self):
-        section = CODE.split("bool const removableQuiver", 1)[1].split("for (uint8 slot = INVENTORY_SLOT_BAG_START;", 1)[0]
+        section = CODE.split("// Only replace a level-one hunter", 1)[1].split("// One Dread Pirate Ring", 1)[0]
         self.assertIn("player->GetLevel() == 1", section)
-        full = CODE.split("bool const removableQuiver", 1)[1].split("// One Dread Pirate Ring", 1)[0]
-        self.assertIn("freeBackpackSlots < itemsToMove", full)
-        self.assertIn("player->CanStoreItem(INVENTORY_SLOT_BAG_0, NULL_SLOT", full)
-        self.assertLess(full.index("nonstarter bag in slot"), full.index("player->DestroyItem("))
-        self.assertLess(full.index("player->RemoveItem(slot, inside, true)"), full.index("player->DestroyItem("))
-        self.assertIn("if (!quiver->IsEmpty())", full)
+        self.assertIn("std::vector<AmmoMove> ammoMoves", section)
+        self.assertIn("ammoMoves.size() >= emptyBackpackSlots.size()", section)
+        self.assertIn("CanStoreItem(INVENTORY_SLOT_BAG_0, destinationSlot", section)
+        self.assertIn("destinations.size() != 1", section)
+        self.assertIn("destinations[0].count != item->GetCount()", section)
+        self.assertLess(section.index("nonstarter bag in slot"), section.index("player->DestroyItem("))
+        self.assertLess(section.index("player->RemoveItem(move.bagSlot"), section.index("player->DestroyItem("))
+        self.assertIn("Item* stored = player->StoreItem(destinations, item, true);", section)
+        self.assertIn("player->GetItemByPos(INVENTORY_SLOT_BAG_0, move.backpackSlot) != stored", section)
+        self.assertIn("quiver->StoreItem(move.itemSlot, item, true)", section)
+        self.assertIn("if (!quiver || !quiver->IsEmpty())", section)
 
     def test_one_atomic_character_receipt_transaction(self):
-        section = CODE.split("if (state == 0)", 1)[1].split("else if (state == 2)", 1)[0]
-        self.assertLess(section.index("player->IsBeingTeleportedFar()"), section.index("GrantStarterPackage(player)"))
+        section = CODE.split("void CompleteStarterGrant(Player* player, uint32 guid)", 1)[1].split("bool ProcessStarterLogin(Player* player)", 1)[0]
+        self.assertIn("if (player->IsBeingTeleportedFar())", CODE.split("bool ProcessStarterLogin(Player* player)", 1)[1])
         self.assertLess(section.index("GrantStarterPackage(player)"), section.index("CharacterDatabase.BeginTransaction()"))
         self.assertLess(section.index("player->SaveToDB(transaction, false, false)"), section.index('transaction->Append('))
         self.assertLess(section.index("transaction->Append("), section.index("CharacterDatabase.DirectCommitTransaction(transaction)"))
@@ -46,21 +51,49 @@ class StarterReview(unittest.TestCase):
         self.assertLess(recovery.index("DirectCommitTransaction(recovery)"),
                         recovery.index("QueryResult recovered"))
         self.assertIn("recoveredState != 1 && recoveredState != 2", recovery)
-        self.assertIn("QueueStarterNoSaveLogout(guid)", recovery)
+        self.assertIn("QueueStarterNoSaveLogout(player)", recovery)
+        self.assertLess(recovery.index("recoveredState != 1 && recoveredState != 2"),
+                        recovery.index("QueueStarterNoSaveLogout(player)"))
+        self.assertLess(recovery.index("QueueStarterNoSaveLogout(player)"),
+                        recovery.index("ChatHandler(player->GetSession())"))
 
-    def test_no_save_logout_is_deferred_until_session_update(self):
+    def test_no_save_logout_is_deferred_and_session_bound(self):
         session = CODE.split("class CustomLoginRecoverySessionScript", 1)[1].split("bool LoginEnable", 1)[0]
         self.assertIn("SESSIONHOOK_ON_UPDATE", session)
-        self.assertIn("pendingStarterLogoutGuids.erase(guid)", session)
+        self.assertIn("pendingStarterLogouts.find(session)", session)
+        self.assertIn("player == it->second.player", session)
+        self.assertIn("player->GetGUID().GetCounter() == it->second.guid", session)
+        self.assertIn("pendingStarterLogouts.erase(it)", session)
         self.assertIn("session->LogoutPlayer(false)", session)
         self.assertIn("new CustomLoginRecoverySessionScript()", CODE)
-        # PlayerLogin is called before the core finishes using its Player*.
-        # Never delete the player there or rely on a regular save-on-disconnect.
+        self.assertIn("ClearPendingStarterLogout(player)", CODE)
+        self.assertIn("std::atomic<bool> hasPendingStarterLogouts", CODE)
         on_login = CODE.split("void OnPlayerLogin(Player* player) override")[-1]
         self.assertNotIn("LogoutPlayer(false)", on_login)
+        self.assertLess(on_login.index("ClearPendingStarterLogout(player)"),
+                        on_login.index("ProcessStarterLogin(player)"))
+        self.assertLess(on_login.index("ClearPendingStarterLogout(player)"),
+                        on_login.index("if (!LoginEnable)"))
+
+    def test_failed_bot_first_receipt_retains_first_login_eligibility(self):
+        section = CODE.split("void OnPlayerFirstLogin(Player* player) override", 1)[1].split("void OnPlayerDelete(", 1)[0]
+        self.assertIn("SELECT state FROM mod_customlogin_starter WHERE guid", section)
+        self.assertIn("if (!receipt)", section)
+        self.assertIn("player->SetAtLoginFlag(AT_LOGIN_FIRST)", section)
+        self.assertIn("PLAYERHOOK_ON_FIRST_LOGIN", CODE)
+        self.assertNotIn("QueueStarterNoSaveLogout", section)
+
+    def test_recovery_state_update_is_conditional(self):
+        conn = sqlite3.connect(":memory:")
+        conn.executescript("CREATE TABLE receipts (guid INTEGER PRIMARY KEY, state INTEGER); "
+                           "INSERT INTO receipts VALUES (1,0),(2,1),(3,2);")
+        for key in (1,2,3):
+            conn.execute("UPDATE receipts SET state=2 WHERE guid=? AND state=0", (key,))
+        self.assertEqual(dict(conn.execute("SELECT guid,state FROM receipts")), {1:2,2:1,3:2})
+        conn.close()
 
     def test_missing_receipt_is_not_level_based(self):
-        section = CODE.split("void OnPlayerLogin(Player* player) override", 2)[-1]
+        section = CODE.split("bool ProcessStarterLogin(Player* player)", 1)[1].split("void OnPlayerLogin(Player* player) override", 1)[0]
         self.assertIn("uint8 initialState = isFirstLogin ? 0 : 1;", section)
         self.assertNotIn("player->GetLevel() == 1 || isFirstLogin", section)
         self.assertIn('if (!receipt)', section)
@@ -70,6 +103,8 @@ class StarterReview(unittest.TestCase):
 
     def test_deprecated_per_item_settings(self):
         self.assertIn("Login.BoA = 1", CONFIG)
+        self.assertNotIn("Login.Announce = ", CONFIG)
+        self.assertNotIn("LoginAnnounceModule", CODE)
         for key in ("Login.BoA.Ring =", "Login.BoA.Bags =", "Login.BoA.Weapon ="):
             self.assertNotIn(key, CONFIG)
         for old_var in ("LoginBOARing", "LoginBOABags", "LoginBOAWeapon3"):
@@ -93,6 +128,56 @@ class StarterReview(unittest.TestCase):
         conn.executescript(insertion)
         self.assertEqual(dict(conn.execute("SELECT guid,state FROM mod_customlogin_starter")), rows)
         conn.close()
+
+    def test_class_equipment_and_skill_manifests_unchanged(self):
+        import json, re
+        snapshot = json.loads((ROOT / "tests/expected_starter_manifest.json").read_text())
+
+        def classes(fragment, operation):
+            chunks = re.findall(r"case\s+(CLASS_[A-Z_]+)\s*:\s*([\s\S]*?)(?=\bcase\s+CLASS_|\bdefault\s*:)", fragment)
+            result = {}
+            for name, body in chunks:
+                if operation == "equipment":
+                    grants = [[int(a), int(b)] for a, b in re.findall(
+                        r"GrantStarterItem\(player,\s*(\d+),\s*(\d+)\)", body)]
+                else:
+                    grants = [int(a) for a in re.findall(r"player->learnSpell\((\d+)\)", body)]
+                result[name] = grants
+            return result
+
+        equipment = CODE.split("static bool GrantClassEquipment(Player* player)", 1)[1].split(
+            "static void GrantWeaponSkills(Player* player)", 1)[0]
+        skills = CODE.split("static void GrantWeaponSkills(Player* player)", 1)[1].split(
+            "static bool GrantSpecialAbilities(Player* player)", 1)[0]
+        self.assertEqual(classes(equipment, "equipment"), snapshot["equipment"])
+        self.assertEqual(classes(skills, "skills"), snapshot["skills"])
+
+    def test_refactored_grant_sequence_and_config_gates(self):
+        section = CODE.split("bool GrantStarterPackage(Player* player)", 1)[1].split(
+            "void CompleteStarterGrant(Player* player", 1)[0]
+        for function in ("PrepareStarterBags(player)", "GrantClassEquipment(player)",
+                         "GrantWeaponSkills(player)", "GrantSpecialAbilities(player)",
+                         "GrantCapitalReputation(player)", "player->ModifyMoney(250000)"):
+            self.assertIn(function, section)
+        self.assertLess(section.index("PrepareStarterBags(player)"), section.index("GrantClassEquipment(player)"))
+        self.assertLess(section.index("GrantClassEquipment(player)"), section.index("GrantWeaponSkills(player)"))
+        self.assertLess(section.index("GrantWeaponSkills(player)"), section.index("GrantSpecialAbilities(player)"))
+        self.assertLess(section.index("GrantSpecialAbilities(player)"), section.index("GrantCapitalReputation(player)"))
+        self.assertLess(section.index("GrantCapitalReputation(player)"), section.index("ModifyMoney(250000)"))
+        for gate in ("if (LoginBOA)", "if (LoginSkills)", "if (LoginReputation)"):
+            self.assertIn(gate, section)
+
+    def test_announcements_retain_old_join_leave_templates(self):
+        block = CODE.split("static void SendPlayerAnnouncement(Player* player, bool joining)", 1)[1].split(
+            "class CustomLogin : public PlayerScript", 1)[0]
+        self.assertIn('"|cffFFFFFF[|cff2897FF Alliance |cffFFFFFF]"', block)
+        self.assertIn('"|cffFFFFFF[|cffFF0000 Horde |cffFFFFFF]"', block)
+        self.assertIn('(joining ? ":" : "")', block)
+        self.assertIn('"|cffFFFFFF has come online."', block)
+        self.assertIn('"|cffFFFFFF has left the game."', block)
+        self.assertIn("LoginPlayerAnnounce", block)
+        self.assertIn("IsHeadless()", block)
+
 
 
 if __name__ == "__main__":
