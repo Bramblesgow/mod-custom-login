@@ -61,7 +61,8 @@ class StarterReview(unittest.TestCase):
         session = CODE.split("class CustomLoginRecoverySessionScript", 1)[1].split("bool LoginEnable", 1)[0]
         self.assertIn("SESSIONHOOK_ON_UPDATE", session)
         self.assertIn("pendingStarterLogouts.find(session)", session)
-        self.assertIn("player->GetGUID().GetCounter() == it->second", session)
+        self.assertIn("player == it->second.player", session)
+        self.assertIn("player->GetGUID().GetCounter() == it->second.guid", session)
         self.assertIn("pendingStarterLogouts.erase(it)", session)
         self.assertIn("session->LogoutPlayer(false)", session)
         self.assertIn("new CustomLoginRecoverySessionScript()", CODE)

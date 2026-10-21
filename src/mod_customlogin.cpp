@@ -76,14 +76,19 @@
 namespace
 {
     std::mutex pendingStarterLogoutMutex;
-    std::unordered_map<WorldSession*, uint32> pendingStarterLogouts;
+    struct PendingStarterLogout
+    {
+        Player* player;
+        uint32 guid;
+    };
+    std::unordered_map<WorldSession*, PendingStarterLogout> pendingStarterLogouts;
     std::atomic<bool> hasPendingStarterLogouts{false};
 
     void QueueStarterNoSaveLogout(Player* player)
     {
         WorldSession* session = player->GetSession();
         std::lock_guard<std::mutex> lock(pendingStarterLogoutMutex);
-        pendingStarterLogouts[session] = player->GetGUID().GetCounter();
+        pendingStarterLogouts[session] = {player, player->GetGUID().GetCounter()};
         hasPendingStarterLogouts.store(true, std::memory_order_release);
     }
 
@@ -95,7 +100,7 @@ namespace
         std::lock_guard<std::mutex> lock(pendingStarterLogoutMutex);
         WorldSession* session = player->GetSession();
         auto it = pendingStarterLogouts.find(session);
-        if (it != pendingStarterLogouts.end() && it->second == player->GetGUID().GetCounter())
+        if (it != pendingStarterLogouts.end() && it->second.guid == player->GetGUID().GetCounter())
             pendingStarterLogouts.erase(it);
         hasPendingStarterLogouts.store(!pendingStarterLogouts.empty(), std::memory_order_release);
     }
@@ -121,7 +126,10 @@ public:
                 return;
 
             Player* player = session->GetPlayer();
-            shouldLogout = player && player->GetGUID().GetCounter() == it->second;
+            // Reconnect can reattach a loaded Player without OnPlayerLogin.
+            // A reused session address and GUID must not inherit an old request.
+            shouldLogout = player && player == it->second.player &&
+                player->GetGUID().GetCounter() == it->second.guid;
             // Always clear the entry, including a vanished or changed player.
             pendingStarterLogouts.erase(it);
             hasPendingStarterLogouts.store(!pendingStarterLogouts.empty(), std::memory_order_release);
