@@ -61,7 +61,8 @@ class StarterReview(unittest.TestCase):
         session = CODE.split("class CustomLoginRecoverySessionScript", 1)[1].split("bool LoginEnable", 1)[0]
         self.assertIn("SESSIONHOOK_ON_UPDATE", session)
         self.assertIn("pendingStarterLogouts.find(session)", session)
-        self.assertIn("player->GetGUID().GetCounter() == it->second", session)
+        self.assertIn("player == it->second.player", session)
+        self.assertIn("player->GetGUID().GetCounter() == it->second.guid", session)
         self.assertIn("pendingStarterLogouts.erase(it)", session)
         self.assertIn("session->LogoutPlayer(false)", session)
         self.assertIn("new CustomLoginRecoverySessionScript()", CODE)
@@ -69,6 +70,10 @@ class StarterReview(unittest.TestCase):
         self.assertIn("std::atomic<bool> hasPendingStarterLogouts", CODE)
         on_login = CODE.split("void OnPlayerLogin(Player* player) override")[-1]
         self.assertNotIn("LogoutPlayer(false)", on_login)
+        self.assertLess(on_login.index("ClearPendingStarterLogout(player)"),
+                        on_login.index("ProcessStarterLogin(player)"))
+        self.assertLess(on_login.index("ClearPendingStarterLogout(player)"),
+                        on_login.index("if (!LoginEnable)"))
 
     def test_failed_bot_first_receipt_retains_first_login_eligibility(self):
         section = CODE.split("void OnPlayerFirstLogin(Player* player) override", 1)[1].split("void OnPlayerDelete(", 1)[0]
