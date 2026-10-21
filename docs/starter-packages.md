@@ -1,16 +1,18 @@
 # Brambletown — New Character Starter Packages
 
-Every new player character receives a starter package on their first login. These packages include heirloom equipment, additional weapon and armor proficiencies, and resources to help players level and experiment with different specializations.
+Eligible new player characters receive a starter package on their first human login. These packages include heirloom equipment, additional weapon and armor proficiencies, and resources to help players level and experiment with different specializations.
 
 ## Important Information
 
-- **First Login Only:** Starter packages are granted once when a new character first enters the world.
+- **First Human Login Only:** Starter packages are granted once to eligible characters when a human first logs in. Headless playerbot logins do not consume the package.
 - **Multiple Specializations:** Hybrid classes receive equipment for different talent specializations.
 - **Weapon Training:** Listed proficiencies are granted automatically without visiting weapon trainers. Normal class and equipment restrictions still apply.
 - **Dual Wield:** Warriors, Rogues, Hunters, Shamans, and Death Knights receive Dual Wield proficiency immediately.
 - **Leveling Equipment:** Shields and additional off-hand weapons are obtained normally through questing, dungeons, vendors, or loot.
-- **Existing Characters:** Updated starter packages are not retroactively granted.
-- **Automated Bots:** Starter rewards do not apply to automated playerbots; you must manually log in to your alt for the process to take place.
+- **Existing Characters:** Previously grandfathered characters do not automatically receive a retroactive package; eligibility is tracked by a per-character database receipt, not by character name.
+- **Automated Bots:** A character first used as a playerbot keeps its pending receipt until its first human login. A failed or partial grant is flagged for administrator review and not automatically retried.
+- **Receipt states:** Pending (0), completed or grandfathered (1), and administrator review after an incomplete grant (2). The database migration must be applied before enabling this implementation.
+- **Hunter quivers:** New level-one hunters retain any quiver contents in available backpack slots before a default quiver is replaced. Existing custom bags are not overwritten; a blocked grant requires administrator review.
 
 ## All Classes Receive
 
