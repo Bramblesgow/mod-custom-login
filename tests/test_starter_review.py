@@ -30,53 +30,63 @@ class StarterReview(unittest.TestCase):
         self.assertIn("if (!quiver || !quiver->IsEmpty())", section)
 
     def test_one_atomic_character_receipt_transaction(self):
-        section = CODE.split("void CompleteStarterGrant(Player* player, uint32 guid)", 1)[1].split("bool ProcessStarterLogin(Player* player)", 1)[0]
-        self.assertIn("if (player->IsBeingTeleportedFar())", CODE.split("bool ProcessStarterLogin(Player* player)", 1)[1])
-        self.assertLess(section.index("GrantStarterPackage(player)"), section.index("CharacterDatabase.BeginTransaction()"))
-        self.assertLess(section.index("player->SaveToDB(transaction, false, false)"), section.index('transaction->Append('))
-        self.assertLess(section.index("transaction->Append("), section.index("CharacterDatabase.AsyncCommitTransaction(transaction)"))
-        self.assertIn("granted ? 1u : 2u", section)
-        self.assertNotIn("CharacterDatabase.DirectExecute", section)
-        self.assertNotIn("CharacterDatabase.DirectCommitTransaction(transaction)", section)
-        self.assertNotIn("CharacterDatabase.CommitTransaction(transaction)", section)
-        self.assertLess(section.index("AsyncCommitTransaction(transaction)"),
-                        section.index("commit.m_future.get()"))
-        self.assertLess(section.index("commit.m_future.get()"),
-                        section.index("QueryResult committedReceipt"))
-        self.assertIn("catch (std::exception const& error)", section)
-        self.assertIn("transactionSucceeded && committedReceipt", section)
-        self.assertLess(section.index("QueryResult committedReceipt"),
-                        section.index("if (!committed)"))
-        self.assertLess(section.index("if (!committed)"),
-                        section.index("else if (granted)"))
-        self.assertIn('committedReceipt->Fetch()[0].Get<uint8>() == (granted ? 1u : 2u)', section)
+        grant = CODE.split("void CompleteStarterGrant(Player* player, uint32 guid)", 1)[1].split(
+            "bool ProcessStarterLogin(Player* player)", 1)[0]
+        self.assertIn("if (player->IsBeingTeleportedFar())", CODE)
+        self.assertLess(grant.index("GrantStarterPackage(player)"), grant.index("CharacterDatabase.BeginTransaction()"))
+        self.assertLess(grant.index("player->SaveToDB(transaction, false, false)"),
+                        grant.index('transaction->Append('))
+        self.assertLess(grant.index("transaction->Append("),
+                        grant.index("CharacterDatabase.AsyncCommitTransaction(transaction)"))
+        self.assertIn("granted ? 1u : 2u", grant)
+        self.assertNotIn("CharacterDatabase.DirectCommitTransaction(transaction)", grant)
+        self.assertIn("std::move(commit.m_future)", grant)
+        self.assertIn("pendingStarterSaves.emplace(guid", grant)
+        self.assertNotIn("commit.m_future.get()", grant)
 
     def test_original_sync_commit_regression(self):
-        section = CODE.split("void CompleteStarterGrant(Player* player, uint32 guid)", 1)[1].split(
+        grant = CODE.split("void CompleteStarterGrant(Player* player, uint32 guid)", 1)[1].split(
             "bool ProcessStarterLogin(Player* player)", 1)[0]
-        # The previous guard explicitly required DirectCommitTransaction,
-        # so a passing test actually permitted the production crash.
-        self.assertIn("player->SaveToDB(transaction, false, false)", section)
-        self.assertIn("CharacterDatabase.AsyncCommitTransaction(transaction)", section)
-        self.assertIn("commit.m_future.get()", section)
-        self.assertNotIn("DirectCommitTransaction(transaction)", section)
-        # The async save is completed before a session callback or logout
-        # can destroy the Player; no uncaptured delayed callback is installed.
-        self.assertNotIn("AfterComplete(", section)
-        self.assertNotIn("AddTransactionCallback(", section)
-        self.assertIn("QueueStarterNoSaveLogout(player)", section)
+        self.assertIn("CharacterDatabase.AsyncCommitTransaction(transaction)", grant)
+        self.assertNotIn("DirectCommitTransaction(transaction)", grant)
+        self.assertNotIn("CharacterDatabase.CommitTransaction(transaction)", grant)
+        # The previous guard insisted on the crashing direct-commit call.
+        self.assertNotIn("commit.m_future.get()", grant)
+        self.assertNotIn("AddTransactionCallback(", grant)
+
+    def test_nonblocking_packet_gate_and_orphan_lifecycle(self):
+        session = CODE.split("void ProcessStarterSaveSession(WorldSession* session)", 2)[-1].split(
+            "void ProcessOrphanStarterSaves()", 1)[0]
+        self.assertIn("completion.wait_for(std::chrono::seconds(0))", session)
+        self.assertNotIn("completion.get()", session)
+        self.assertIn("session->IsSocketClosed() || session->IsLoggingOut()", session)
+        self.assertIn("it->second.player = nullptr", session)
+        self.assertIn("QueueStarterNoSaveLogout(player)", session)
+        orphan = CODE.split("// Completed transactions for disconnected sessions", 1)[1].split(
+            "// AzerothCore's AddItem", 1)[0]
+        self.assertIn("!it->second.player", orphan)
+        self.assertIn("std::move(it->second.completion)", orphan)
+        self.assertIn("FinalizeStarterSave(nullptr", orphan)
+        gate = CODE.split("class CustomLoginPendingPacketScript", 1)[1].split("bool LoginEnable", 1)[0]
+        self.assertIn("SERVERHOOK_CAN_PACKET_RECEIVE", gate)
+        self.assertIn("return !IsStarterSaveSession(session)", gate)
+        self.assertIn("new CustomLoginPendingPacketScript()", CODE)
+        self.assertIn("PLAYERHOOK_ON_BEFORE_LOGOUT", CODE)
+        self.assertIn("OrphanStarterSave(player)", CODE)
+        self.assertIn("HasPendingStarterSave(guid)", CODE)
+        self.assertIn("WORLDHOOK_ON_UPDATE", CODE)
 
     def test_unconfirmed_commit_recovery_cannot_leave_regrant_open(self):
-        recovery = CODE.split("if (!committed)", 1)[1].split("else if (granted)", 1)[0]
+        recovery = CODE.split("void FinalizeStarterSave(Player* player,", 1)[1].split(
+            "void ProcessStarterSaveSession(WorldSession* session)", 1)[0]
+        self.assertIn("success && receipt", recovery)
         self.assertIn("SET state = 2 WHERE guid = {} AND state = 0", recovery)
         self.assertLess(recovery.index("DirectCommitTransaction(recovery)"),
                         recovery.index("QueryResult recovered"))
-        self.assertIn("recoveredState != 1 && recoveredState != 2", recovery)
         self.assertIn("QueueStarterNoSaveLogout(player)", recovery)
-        self.assertLess(recovery.index("recoveredState != 1 && recoveredState != 2"),
-                        recovery.index("QueueStarterNoSaveLogout(player)"))
         self.assertLess(recovery.index("QueueStarterNoSaveLogout(player)"),
                         recovery.index("ChatHandler(player->GetSession())"))
+        self.assertIn("if (player)", recovery)
 
     def test_no_save_logout_is_deferred_and_session_bound(self):
         session = CODE.split("class CustomLoginRecoverySessionScript", 1)[1].split("bool LoginEnable", 1)[0]
