@@ -6,7 +6,8 @@ on:
       - "src/mod_customlogin.cpp"
       - "conf/mod_customlogin.conf.dist"
       - "data/sql/db-characters/updates/**"
-      - "tests/test_starter_review.py"
+      - "tests/**"
+      - "docs/starter-packages.md"
       - ".github/workflows/starter-review.yml"
 
 permissions:
@@ -17,7 +18,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run starter receipts and source guard tests
-        run: python3 tests/test_starter_review.py
+      - name: Run starter receipt, manifest, and SQLite model regressions
+        run: python3 -m unittest discover -s tests -p 'test_*.py'
       - name: Explain test scope
         run: echo "These are static/in-memory tests; full AzerothCore build and gameplay verification are separately required."

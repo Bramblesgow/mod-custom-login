@@ -16,8 +16,8 @@
 # Enable the module? (default: 1)
 Login.Enable = 1
 
-# Announce the module when the player logs in? (default: 1)
-Login.Announce = 1
+# Obsolete Login.Announce was removed: it only sent an empty chat line.
+# Login.PlayerAnnounce below still controls player join/leave messages.
 
 # Inform when players enter and exit the game (default: 1)
 Login.PlayerAnnounce = 1
