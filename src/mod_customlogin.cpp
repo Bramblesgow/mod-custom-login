@@ -62,10 +62,13 @@
 #include "GuildMgr.h"
 #include "Player.h"
 #include "ScriptMgr.h"
+#include "ServerScript.h"
 #include "WorldSession.h"
 #include "WorldSessionMgr.h"
 #include <atomic>
 #include <exception>
+#include <chrono>
+#include <future>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -84,6 +87,50 @@ namespace
     };
     std::unordered_map<WorldSession*, PendingStarterLogout> pendingStarterLogouts;
     std::atomic<bool> hasPendingStarterLogouts{false};
+
+    struct PendingStarterSave
+    {
+        WorldSession* session;
+        Player* player;
+        uint32 guid;
+        bool granted;
+        std::future<bool> completion;
+    };
+    std::mutex pendingStarterSaveMutex;
+    std::unordered_map<uint32, PendingStarterSave> pendingStarterSaves;
+
+    void ProcessStarterSaveSession(WorldSession* session);
+    void ProcessOrphanStarterSaves();
+
+    bool HasPendingStarterSave(uint32 guid)
+    {
+        std::lock_guard<std::mutex> lock(pendingStarterSaveMutex);
+        return pendingStarterSaves.find(guid) != pendingStarterSaves.end();
+    }
+
+    void OrphanStarterSave(Player* player)
+    {
+        std::lock_guard<std::mutex> lock(pendingStarterSaveMutex);
+        auto it = pendingStarterSaves.find(player->GetGUID().GetCounter());
+        if (it != pendingStarterSaves.end() &&
+            it->second.player == player && it->second.session == player->GetSession())
+        {
+            it->second.player = nullptr;
+            it->second.session = nullptr;
+        }
+    }
+
+    bool IsStarterSaveSession(WorldSession* session)
+    {
+        Player* player = session ? session->GetPlayer() : nullptr;
+        if (!player)
+            return false;
+
+        std::lock_guard<std::mutex> lock(pendingStarterSaveMutex);
+        auto it = pendingStarterSaves.find(player->GetGUID().GetCounter());
+        return it != pendingStarterSaves.end() &&
+            it->second.session == session && it->second.player == player;
+    }
 
     void QueueStarterNoSaveLogout(Player* player)
     {
@@ -116,7 +163,12 @@ public:
 
     void OnSessionUpdate(WorldSession* session, uint32 /*diff*/) override
     {
-        if (!session || !hasPendingStarterLogouts.load(std::memory_order_acquire))
+        if (!session)
+            return;
+
+        ProcessStarterSaveSession(session);
+
+        if (!hasPendingStarterLogouts.load(std::memory_order_acquire))
             return;
 
         bool shouldLogout = false;
@@ -144,6 +196,21 @@ public:
     }
 };
 
+class CustomLoginPendingPacketScript : public ServerScript
+{
+public:
+    CustomLoginPendingPacketScript() : ServerScript("CustomLoginPendingPacketScript", {
+        SERVERHOOK_CAN_PACKET_RECEIVE
+    }) { }
+
+    bool CanPacketReceive(WorldSession* session, WorldPacket const& /*packet*/) override
+    {
+        // Rewards are in memory before the receipt commit finishes.
+        // Suppress game actions until persistence is confirmed.
+        return !IsStarterSaveSession(session);
+    }
+};
+
 bool LoginEnable = 1;
 bool LoginPlayerAnnounce = 1;
 bool LoginBOA = 1;
@@ -155,8 +222,14 @@ class LoginConfig : public WorldScript
 {
 public:
     LoginConfig() : WorldScript("LoginConfig", {
-        WORLDHOOK_ON_BEFORE_CONFIG_LOAD
+        WORLDHOOK_ON_BEFORE_CONFIG_LOAD,
+        WORLDHOOK_ON_UPDATE
     }) { }
+
+    void OnUpdate(uint32 /*diff*/) override
+    {
+        ProcessOrphanStarterSaves();
+    }
 
     void OnBeforeConfigLoad(bool reload) override
     {
@@ -628,6 +701,7 @@ public:
     CustomLogin() : PlayerScript("CustomLogin", {
         PLAYERHOOK_ON_LOGIN,
         PLAYERHOOK_ON_FIRST_LOGIN,
+        PLAYERHOOK_ON_BEFORE_LOGOUT,
         PLAYERHOOK_ON_LOGOUT,
         PLAYERHOOK_ON_DELETE
     }) { }
@@ -836,10 +910,19 @@ public:
     }
 
 
+    void OnPlayerBeforeLogout(Player* player) override
+    {
+        if (player)
+            OrphanStarterSave(player);
+    }
+
     void OnPlayerLogout(Player* player) override
     {
         if (player)
+        {
+            OrphanStarterSave(player);
             ClearPendingStarterLogout(player);
+        }
         SendPlayerAnnouncement(player, false);
     }
 };
@@ -849,4 +932,5 @@ void AddCustomLoginScripts()
     new LoginConfig();
     new CustomLogin();
     new CustomLoginRecoverySessionScript();
+    new CustomLoginPendingPacketScript();
 }
