@@ -94,6 +94,7 @@ namespace
         Player* player;
         uint32 guid;
         bool granted;
+        std::chrono::steady_clock::time_point started;
         std::future<bool> completion;
     };
     std::mutex pendingStarterSaveMutex;
@@ -335,7 +336,8 @@ namespace
                 completion = std::move(it->second.completion);
                 pendingStarterSaves.erase(it);
             }
-            else if (session->IsSocketClosed() || session->IsLoggingOut())
+            else if (session->IsSocketClosed() || session->IsLoggingOut() ||
+                std::chrono::steady_clock::now() - it->second.started > std::chrono::seconds(5))
             {
                 it->second.player = nullptr;
                 it->second.session = nullptr;
@@ -347,7 +349,7 @@ namespace
             FinalizeStarterSave(player, guid, granted, StarterCommitSucceeded(completion, guid));
         else if (mustLogout)
         {
-            LOG_ERROR("module", "CustomLogin: session closed with pending starter save for GUID {}",
+            LOG_ERROR("module", "CustomLogin: session closed or grant timed out for GUID {}",
                 guid);
             QueueStarterNoSaveLogout(player);
         }
@@ -907,7 +909,8 @@ public:
             TransactionCallback commit = CharacterDatabase.AsyncCommitTransaction(transaction);
             std::lock_guard<std::mutex> lock(pendingStarterSaveMutex);
             pendingStarterSaves.emplace(guid, PendingStarterSave{
-                player->GetSession(), player, guid, granted, std::move(commit.m_future)});
+                player->GetSession(), player, guid, granted,
+                std::chrono::steady_clock::now(), std::move(commit.m_future)});
         }
         catch (std::exception const& error)
         {
