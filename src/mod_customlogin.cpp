@@ -893,80 +893,28 @@ public:
 
     void CompleteStarterGrant(Player* player, uint32 guid)
     {
-        bool granted = GrantStarterPackage(player);
-        // Character inventory, money, and the receipt must commit
-        // together, including partial grants needing GM review.
+        bool const granted = GrantStarterPackage(player);
+        // Rewards, gold and receipt update form one transaction on a worker
+        // with the asynchronous character-save statements prepared.
         CharacterDatabaseTransaction transaction = CharacterDatabase.BeginTransaction();
         player->SaveToDB(transaction, false, false);
         transaction->Append(
             "UPDATE mod_customlogin_starter SET state = {} WHERE guid = {} AND state = 0",
             granted ? 1u : 2u, guid);
-        // Player::SaveToDB appends statements prepared for asynchronous
-        // connections. A direct commit uses a synchronous connection, where
-        // those statements are absent and can crash the worldserver.
-        //
-        // Await the async worker here: the first-login save must finish
-        // before this Player can be used, logged out, or saved again. This
-        // also avoids callbacks retaining a potentially destroyed session.
-        bool transactionSucceeded = false;
+
         try
         {
             TransactionCallback commit = CharacterDatabase.AsyncCommitTransaction(transaction);
-            transactionSucceeded = commit.m_future.get();
+            std::lock_guard<std::mutex> lock(pendingStarterSaveMutex);
+            pendingStarterSaves.emplace(guid, PendingStarterSave{
+                player->GetSession(), player, guid, granted, std::move(commit.m_future)});
         }
         catch (std::exception const& error)
         {
-            LOG_ERROR("module", "CustomLogin: starter transaction for {} did not complete: {}",
+            LOG_ERROR("module", "CustomLogin: cannot queue starter transaction for {}: {}",
                 player->GetName(), error.what());
+            FinalizeStarterSave(player, guid, granted, false);
         }
-
-        // Check the durable receipt even on reported success. The receipt
-        // update is conditional, and transaction success alone does not
-        // prove that a receipt row was transitioned.
-        QueryResult committedReceipt = CharacterDatabase.Query(
-            "SELECT state FROM mod_customlogin_starter WHERE guid = {}", guid);
-        bool committed = transactionSucceeded && committedReceipt &&
-            committedReceipt->Fetch()[0].Get<uint8>() == (granted ? 1u : 2u);
-        if (!committed)
-        {
-            // A failed commit may leave rewards in memory while
-            // the durable receipt still permits another grant.
-            // Mark the receipt for GM review without replacing
-            // an already-completed receipt.
-            CharacterDatabaseTransaction recovery = CharacterDatabase.BeginTransaction();
-            recovery->Append(
-                "UPDATE mod_customlogin_starter SET state = 2 WHERE guid = {} AND state = 0", guid);
-            CharacterDatabase.DirectCommitTransaction(recovery);
-
-            QueryResult recovered = CharacterDatabase.Query(
-                "SELECT state FROM mod_customlogin_starter WHERE guid = {}", guid);
-            uint8 recoveredState = recovered ? recovered->Fetch()[0].Get<uint8>() : 0;
-            if (recoveredState != 1 && recoveredState != 2)
-            {
-                LOG_ERROR("module", "CustomLogin: cannot secure receipt for {}; scheduling no-save logout",
-                    player->GetName());
-            }
-            else
-                LOG_ERROR("module", "CustomLogin: starter receipt for {} recovered to state {}",
-                    player->GetName(), recoveredState);
-
-            // Even when the receipt is secured, a failed initial
-            // character save leaves rewards in an uncertain state.
-            // Never allow them to be used or saved again this login.
-            QueueStarterNoSaveLogout(player);
-
-            ChatHandler(player->GetSession()).SendSysMessage(
-                "Your starter package status is unavailable. Please contact a server administrator.");
-        }
-        else if (granted)
-        {
-            if (LoginBOA)
-                ChatHandler(player->GetSession()).SendSysMessage(
-                    "Welcome to Brambletown! Your starter heirlooms, four Frostweave Bags, and 25 gold have been added.");
-        }
-        else
-            ChatHandler(player->GetSession()).SendSysMessage(
-                "Your starter package could not be completed. Please contact a server administrator.");
     }
 
     // Return false only when the core must defer login handling for a teleport.
@@ -1015,6 +963,14 @@ public:
 
         if (state != 0)
             return true;
+
+        // A previous disconnected session may still be committing a grant.
+        // Never issue a second package until its result has been reconciled.
+        if (HasPendingStarterSave(guid))
+        {
+            QueueStarterNoSaveLogout(player);
+            return true;
+        }
 
         // Player::SaveToDB defers the save during a far teleport.
         if (player->IsBeingTeleportedFar())
