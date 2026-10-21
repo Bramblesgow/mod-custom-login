@@ -254,6 +254,138 @@ public:
 
 ;
 
+
+namespace
+{
+    bool StarterCommitSucceeded(std::future<bool>& completion, uint32 guid)
+    {
+        try
+        {
+            return completion.get();
+        }
+        catch (std::exception const& error)
+        {
+            LOG_ERROR("module", "CustomLogin: starter transaction for GUID {} did not complete: {}",
+                guid, error.what());
+            return false;
+        }
+    }
+
+    // This function may run after the originating Player has been destroyed.
+    // Only use its Player argument when validated against the active session.
+    void FinalizeStarterSave(Player* player, uint32 guid, bool granted, bool success)
+    {
+        QueryResult receipt = CharacterDatabase.Query(
+            "SELECT state FROM mod_customlogin_starter WHERE guid = {}", guid);
+        bool const committed = success && receipt &&
+            receipt->Fetch()[0].Get<uint8>() == (granted ? 1u : 2u);
+
+        if (!committed)
+        {
+            // Raw SQL only: this synchronous recovery transaction does not
+            // use the character save's async-only prepared statements.
+            CharacterDatabaseTransaction recovery = CharacterDatabase.BeginTransaction();
+            recovery->Append(
+                "UPDATE mod_customlogin_starter SET state = 2 WHERE guid = {} AND state = 0", guid);
+            CharacterDatabase.DirectCommitTransaction(recovery);
+
+            QueryResult recovered = CharacterDatabase.Query(
+                "SELECT state FROM mod_customlogin_starter WHERE guid = {}", guid);
+            uint8 const recoveredState = recovered ? recovered->Fetch()[0].Get<uint8>() : 0;
+            LOG_ERROR("module", "CustomLogin: unverified starter save for GUID {}, receipt state {}",
+                guid, recoveredState);
+
+            if (player)
+            {
+                // Consumed in this session update before the core's timed
+                // save-on-logout, preserving the unverified save barrier.
+                QueueStarterNoSaveLogout(player);
+                ChatHandler(player->GetSession()).SendSysMessage(
+                    "Your starter package status is unavailable. Please contact a server administrator.");
+            }
+        }
+        else if (player && granted && LoginBOA)
+            ChatHandler(player->GetSession()).SendSysMessage(
+                "Welcome to Brambletown! Your starter heirlooms, four Frostweave Bags, and 25 gold have been added.");
+        else if (player && !granted)
+            ChatHandler(player->GetSession()).SendSysMessage(
+                "Your starter package could not be completed. Please contact a server administrator.");
+    }
+
+    void ProcessStarterSaveSession(WorldSession* session)
+    {
+        Player* player = session->GetPlayer();
+        if (!player)
+            return;
+
+        uint32 const guid = player->GetGUID().GetCounter();
+        std::future<bool> completion;
+        bool granted = false;
+        bool mustLogout = false;
+        {
+            std::lock_guard<std::mutex> lock(pendingStarterSaveMutex);
+            auto it = pendingStarterSaves.find(guid);
+            if (it == pendingStarterSaves.end() ||
+                it->second.player != player || it->second.session != session)
+                return;
+
+            if (it->second.completion.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+            {
+                granted = it->second.granted;
+                completion = std::move(it->second.completion);
+                pendingStarterSaves.erase(it);
+            }
+            else if (session->IsSocketClosed() || session->IsLoggingOut())
+            {
+                it->second.player = nullptr;
+                it->second.session = nullptr;
+                mustLogout = true;
+            }
+        }
+
+        if (completion.valid())
+            FinalizeStarterSave(player, guid, granted, StarterCommitSucceeded(completion, guid));
+        else if (mustLogout)
+        {
+            LOG_ERROR("module", "CustomLogin: session closed with pending starter save for GUID {}",
+                guid);
+            QueueStarterNoSaveLogout(player);
+        }
+    }
+
+    // Completed transactions for disconnected sessions are still reconciled.
+    // No callback holds or dereferences the detached Player/WorldSession.
+    void ProcessOrphanStarterSaves()
+    {
+        struct CompletedSave
+        {
+            uint32 guid;
+            bool granted;
+            std::future<bool> completion;
+        };
+        std::vector<CompletedSave> completed;
+        {
+            std::lock_guard<std::mutex> lock(pendingStarterSaveMutex);
+            for (auto it = pendingStarterSaves.begin(); it != pendingStarterSaves.end();)
+            {
+                if (!it->second.player &&
+                    it->second.completion.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+                {
+                    completed.push_back({it->first, it->second.granted,
+                        std::move(it->second.completion)});
+                    it = pendingStarterSaves.erase(it);
+                }
+                else
+                    ++it;
+            }
+        }
+
+        for (CompletedSave& save : completed)
+            FinalizeStarterSave(nullptr, save.guid, save.granted,
+                StarterCommitSucceeded(save.completion, save.guid));
+    }
+}
+
 // AzerothCore's AddItem may return true after storing only part of a stack.
 // Check capacity first and verify the entire requested quantity was added.
 static bool GrantStarterItem(Player* player, uint32 itemId, uint32 quantity)
