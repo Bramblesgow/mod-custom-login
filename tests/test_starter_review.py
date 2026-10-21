@@ -60,6 +60,7 @@ class StarterReview(unittest.TestCase):
         self.assertIn("completion.wait_for(std::chrono::seconds(0))", session)
         self.assertNotIn("completion.get()", session)
         self.assertIn("session->IsSocketClosed() || session->IsLoggingOut()", session)
+        self.assertIn("std::chrono::steady_clock::now() - it->second.started > std::chrono::seconds(5)", session)
         self.assertIn("it->second.player = nullptr", session)
         self.assertIn("QueueStarterNoSaveLogout(player)", session)
         orphan = CODE.split("// Completed transactions for disconnected sessions", 1)[1].split(
