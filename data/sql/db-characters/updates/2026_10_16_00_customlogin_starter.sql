@@ -7,7 +7,11 @@ CREATE TABLE IF NOT EXISTS `mod_customlogin_starter` (
   PRIMARY KEY (`guid`)
 ) ENGINE=InnoDB;
 
--- Historical rollout: level-2+ characters are exempt; level-1 characters are eligible.
--- Existing rows are never changed, preserving receipts for new characters leveled by bots.
-INSERT IGNORE INTO `mod_customlogin_starter` (`guid`, `state`)
-SELECT `guid`, CASE WHEN `level` >= 2 THEN 1 ELSE 0 END FROM `characters`;
+-- Initial rollout only. INSERT IGNORE preserves all existing receipts.
+-- 0x20 = AT_LOGIN_FIRST: never-logged level-1 characters remain eligible.
+-- Bot-first accounts are supported by the pending receipt written by
+-- OnPlayerLogin before the core consumes AT_LOGIN_FIRST. For older bot-first
+-- characters without a receipt, an administrator must verify eligibility.
+INSERT IGNORE INTO mod_customlogin_starter (guid, state)
+SELECT guid, CASE WHEN level = 1 AND (at_login & 0x20) <> 0 THEN 0 ELSE 1 END
+FROM characters;
