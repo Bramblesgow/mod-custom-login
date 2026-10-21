@@ -65,6 +65,7 @@
 #include "WorldSession.h"
 #include "WorldSessionMgr.h"
 #include <atomic>
+#include <exception>
 #include <mutex>
 #include <unordered_map>
 #include <vector>
@@ -694,14 +695,31 @@ public:
         transaction->Append(
             "UPDATE mod_customlogin_starter SET state = {} WHERE guid = {} AND state = 0",
             granted ? 1u : 2u, guid);
-        CharacterDatabase.DirectCommitTransaction(transaction);
+        // Player::SaveToDB appends statements prepared for asynchronous
+        // connections. A direct commit uses a synchronous connection, where
+        // those statements are absent and can crash the worldserver.
+        //
+        // Await the async worker here: the first-login save must finish
+        // before this Player can be used, logged out, or saved again. This
+        // also avoids callbacks retaining a potentially destroyed session.
+        bool transactionSucceeded = false;
+        try
+        {
+            TransactionCallback commit = CharacterDatabase.AsyncCommitTransaction(transaction);
+            transactionSucceeded = commit.m_future.get();
+        }
+        catch (std::exception const& error)
+        {
+            LOG_ERROR("module", "CustomLogin: starter transaction for {} did not complete: {}",
+                player->GetName(), error.what());
+        }
 
-        // DirectCommitTransaction is synchronous but does not report
-        // failure to its caller. Confirm the durable receipt before
-        // telling the player that their starter package completed.
+        // Check the durable receipt even on reported success. The receipt
+        // update is conditional, and transaction success alone does not
+        // prove that a receipt row was transitioned.
         QueryResult committedReceipt = CharacterDatabase.Query(
             "SELECT state FROM mod_customlogin_starter WHERE guid = {}", guid);
-        bool committed = committedReceipt &&
+        bool committed = transactionSucceeded && committedReceipt &&
             committedReceipt->Fetch()[0].Get<uint8>() == (granted ? 1u : 2u);
         if (!committed)
         {
