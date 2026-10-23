@@ -37,3 +37,7 @@ Production build from the same tested gameplay source, rebuilt with production c
 Released October 23, 2026 after explicit owner approval. Production controller recorded success at **11:48 AM America/Chicago (CDT)**. Auth/world ports responded, world console responded, and the inspected error log was empty. All **35 production configuration files remained byte-for-byte unchanged**; original authserver retained. Production characters/starter receipts and normal loot rates preserved; no cloned test data, guaranteed-drop fixtures or test configuration were imported.
 
 Production rollback binaries, database dumps, configuration backup, migration output and deployment manifest are retained on the authorized server under `rollout-20261023/`. Test evidence is retained under `combined-runtime-20261023/evidence/`. Live startup checks are operational checks, not a substitute for later human gameplay confirmation.
+
+## Staging preparation follow-up
+
+[Combined staging preflight issue](https://github.com/Bramblesgow/mod-brambletown-services/issues/11) records the cloned realm's stale flags, the compiled module-config path mismatch and missing UAC pet data. The issue is on the NPC Services board because this fork's Issues tracker is disabled. Require actual runtime configuration loading and declared data parity before future client testing; do not change live settings to match test defaults.
